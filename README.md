@@ -1,18 +1,48 @@
 # pi-session-minimap
 
-A non-capturing side pane for [pi](https://pi.dev). It shows:
+**Stay oriented in long-running [pi](https://pi.dev) sessions.**
 
-- the current semantic goal and append-only goal history
+`pi-session-minimap` turns a long agent transcript into a live semantic map. It keeps the current goal, prior goals, context pressure, cost, tool activity, and failures visible without taking focus from the editor.
+
+```text
+╭──────────────────────────────────────────────────────────╮
+│ Session minimap                                          │
+│ ● Current · Prepare the first public release             │
+│ tok 128k→9k · $2.14 · ctx now61% ▓▓▓▓░░                 │
+│ work agent137k · minimap412 · calls84 · skills3 · err2   │
+├──────────────────────────────────────────────────────────┤
+│ 1. Build append-only semantic history                    │
+│    ctx 18→47%                                            │
+│ 2. Add context resets and failure analysis               │
+│    ctx start 47% · end 31% · ↻1                          │
+╰──────────────────────────────────────────────────────────╯
+```
+
+## Why
+
+Long sessions make it hard to answer basic questions:
+
+- What is the agent working on now?
+- Which goals are complete?
+- How close is the context window to overflow?
+- Where did the time, tokens, and cost go?
+- Which failures recovered, and which still need attention?
+
+The minimap answers these questions in a glanceable, non-capturing pane.
+
+## Views
+
+**Compact view** keeps the current semantic goal, session totals, context state, and recent history beside the conversation.
+
+**Expanded view** adds a five-column timeline, nested tool tokens, invoked skill totals, failure analysis, and up to three consequential decisions.
+
+Both views show:
+
 - input/output tokens, cost, and context-window usage
 - agent and minimap-summary token spend
-- tool calls, invoked skills, resets, nested tool tokens, and errors
-- context growth, compactions, and overflow
-
-Related follow-ups, questions, retries, and refinements stay in one broad semantic step. Only an unrelated objective closes the step and opens another.
-
-Completed steps are append-only. The open step is checkpointed for resume. Later factual title corrections are stored as overlays, so the original history stays unchanged.
-
-Legacy sessions recover display-only steps from compaction boundaries. Recovered steps are marked `≈`. The dashboard condenses consequential decisions and skill invocation totals.
+- tool calls, compactions, overflow, and categorized errors
+- append-only semantic steps that span related follow-ups and retries
+- display-only recovery for sessions created before the extension was installed
 
 ## Install
 
@@ -20,22 +50,32 @@ Legacy sessions recover display-only steps from compaction boundaries. Recovered
 pi install npm:pi-session-minimap
 ```
 
-Or try the extension directly from this checkout:
+Or run it directly from this checkout:
 
 ```bash
 pi -e ./extensions/minimap.ts
 ```
 
-## Use
+## Controls
 
-- Use `/minimap` to hide or show the pane.
-- Press `Ctrl+Shift+M` to switch between compact and expanded views.
-- Scroll with `Ctrl+Shift+K` and `Ctrl+Shift+J`.
-- `↻` marks compaction. `▲` marks overflow.
+| Action | Key |
+| --- | --- |
+| Hide or show | `/minimap` |
+| Switch compact/expanded | `Ctrl+Shift+M` |
+| Scroll up | `Ctrl+Shift+K` |
+| Scroll down | `Ctrl+Shift+J` |
 
-The compact view shows the current goal first. Session totals and recent history follow it. The expanded dashboard adds the five-column timeline, nested tool tokens, skill totals, failure analysis, and up to three recent decisions.
+`↻` marks compaction. `▲` marks overflow. `≈` marks recovered legacy history.
 
 The compact pane opens automatically in interactive terminals that are at least 110 columns wide.
+
+## Semantic history
+
+Related follow-ups, questions, retries, and refinements stay in one broad semantic step. Only an unrelated objective closes the step and opens another.
+
+Completed steps are append-only. The open step is checkpointed for resume. Later factual title corrections are stored as overlays, so the original history stays unchanged.
+
+The extension uses the currently selected model to classify semantic boundaries. It stores compact metadata in the pi session file. It does not capture keyboard input or take terminal focus.
 
 ## Development
 
@@ -43,3 +83,5 @@ The compact pane opens automatically in interactive terminals that are at least 
 npm install
 npm run check
 ```
+
+MIT licensed.

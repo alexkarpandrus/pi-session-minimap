@@ -252,9 +252,7 @@ export const restoreSavedState = (
       open = checkpoint.closed ? undefined : checkpoint.open;
   }
 
-  const entryIndexes = new Map(
-    branch.map((entry, index) => [entry.id, index]),
-  );
+  const entryIndexes = new Map(branch.map((entry, index) => [entry.id, index]));
   const persistedIds = new Set(persisted.map((step) => step.throughEntryId));
   const firstPersistedIndex = persisted.length
     ? Math.min(
@@ -1091,7 +1089,6 @@ export const compactMetrics = (
   ];
 };
 
-
 const resetCountLabel = (resets: ContextReset[]): string => {
   if (!resets.length) return "";
   const overflow = resets.some((reset) => (reset.beforePercent ?? 0) > 100);
@@ -1843,10 +1840,7 @@ export default function minimapExtension(pi: ExtensionAPI) {
 
   const restore = (ctx: ExtensionContext) => {
     const branch = ctx.sessionManager.getBranch();
-    const restored = restoreSavedState(
-      branch,
-      ctx.model?.contextWindow ?? 0,
-    );
+    const restored = restoreSavedState(branch, ctx.model?.contextWindow ?? 0);
     state.steps = applyStepCorrections(restored.steps, branch);
     state.open = restored.open;
   };

@@ -858,7 +858,6 @@ test("current context only fills the latest unresolved compaction", () => {
   assert.equal(resets[1]?.afterTokens, 25);
 });
 
-
 test("settled semantic threads are not shown as active work", () => {
   assert.equal(minimapStatus(true, true), "active");
   assert.equal(minimapStatus(false, true), "settled");
