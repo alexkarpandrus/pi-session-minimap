@@ -23,10 +23,11 @@ import {
 const ENTRY_TYPE = "session-minimap-step";
 const STATE_ENTRY_TYPE = "session-minimap-open-step";
 const CORRECTION_ENTRY_TYPE = "session-minimap-step-correction";
+const RECONSTRUCTION_ENTRY_TYPE = "session-minimap-reconstruction";
 const STEP_VERSION = 1;
 const SUMMARY_SYSTEM_PROMPT = `Maintain a semantic minimap of an AI coding session.
-A step is a broad task thread and may span multiple user messages, retries, corrections, questions, added requirements, and visual refinements.
-Use CONTINUE for any activity within the same feature or objective. Use NEW only when the user switches to an unrelated objective or product area. When uncertain, use CONTINUE.
+A step is one meaningful milestone. Related retries, corrections, questions, and refinements stay in that step.
+Use NEW when the deliverable or phase changes materially, even inside the same project: research to implementation, local verification to deployment, adding a new data source, redesigning the UI, or localization. Use CONTINUE only when the activity directly advances the current milestone. When uncertain, prefer NEW if the expected user-visible outcome changed.
 Standalone skill/resource injection is not a new step unless work is requested.
 Reply with:
 CONTINUE or NEW
@@ -39,6 +40,13 @@ Title-correction mechanics and summarization behavior are routine implementation
 For CONTINUE, rewrite the title to reflect the currently accepted outcome across the existing step and new activity. Remove rejected, declined, corrected, or superseded approaches instead of preserving them in the title. For NEW, summarize only the new activity.
 Never claim an approach was used, integrated, or implemented when it was only evaluated, compared, or rejected.
 Omit tool names, file names, commands, token stats, reload instructions, and implementation trivia.`;
+
+const REBUILD_SYSTEM_PROMPT = `Rebuild a semantic minimap for a session that has history but no completed steps.
+Group consecutive user requests into meaningful milestones. Start a new milestone when the deliverable or phase changes materially, even within the same project. Merge brief confirmations and direct follow-ups into the preceding milestone.
+Reply only with ascending lines in this format:
+STEP <last request number> | <6-10 word completed milestone title>
+CURRENT <last request number> | <6-10 word current milestone title>
+Use every request exactly once. The final line must be CURRENT and end at the final request number. Produce 2-8 milestones. Use the outcome evidence: never claim failed, rejected, or incomplete work was completed.`;
 
 type UsageSnapshot = Pick<
   Usage,
@@ -101,6 +109,13 @@ interface OpenStateData {
   open?: OpenStep;
   closed?: true;
   usageOnly?: true;
+  callUsage: UsageSnapshot;
+}
+
+interface ReconstructionData {
+  version: 1;
+  steps: MinimapStep[];
+  open: OpenStep;
   callUsage: UsageSnapshot;
 }
 
@@ -235,13 +250,41 @@ const openStateFromEntry = (entry: SessionEntry): OpenStateData | undefined =>
     ? entry.data
     : undefined;
 
+const reconstructionFromEntry = (
+  entry: SessionEntry,
+): ReconstructionData | undefined => {
+  if (
+    entry.type !== "custom" ||
+    entry.customType !== RECONSTRUCTION_ENTRY_TYPE ||
+    !entry.data ||
+    typeof entry.data !== "object"
+  )
+    return undefined;
+  const data = entry.data as Partial<ReconstructionData>;
+  return data.version === STEP_VERSION &&
+    Array.isArray(data.steps) &&
+    data.steps.every(isMinimapStep) &&
+    !!data.open &&
+    !!data.callUsage
+    ? (data as ReconstructionData)
+    : undefined;
+};
+
 export const restoreSavedState = (
   branch: SessionEntry[],
   contextWindow = 0,
 ): Pick<ViewState, "steps" | "open"> => {
   const persisted: MinimapStep[] = [];
   let open: OpenStep | undefined;
+  let reconstructed = false;
   for (const entry of branch) {
+    const reconstruction = reconstructionFromEntry(entry);
+    if (reconstruction) {
+      persisted.splice(0, persisted.length, ...reconstruction.steps);
+      open = reconstruction.open;
+      reconstructed = true;
+      continue;
+    }
     const step = stepFromEntry(entry);
     if (step) {
       persisted.push(step);
@@ -270,12 +313,14 @@ export const restoreSavedState = (
     firstPersistedIndex,
     firstCheckpointIndex < 0 ? Number.MAX_SAFE_INTEGER : firstCheckpointIndex,
   );
-  const recoveredPrefix = recoverHistoricalSteps(branch, contextWindow).filter(
-    (step) =>
-      !persistedIds.has(step.throughEntryId) &&
-      (entryIndexes.get(step.throughEntryId) ?? Number.MAX_SAFE_INTEGER) <
-        recoveryBoundary,
-  );
+  const recoveredPrefix = reconstructed
+    ? []
+    : recoverHistoricalSteps(branch, contextWindow).filter(
+        (step) =>
+          !persistedIds.has(step.throughEntryId) &&
+          (entryIndexes.get(step.throughEntryId) ?? Number.MAX_SAFE_INTEGER) <
+            recoveryBoundary,
+      );
   const steps = inferStepContexts(
     [...recoveredPrefix, ...persisted],
     branch,
@@ -402,6 +447,12 @@ export const collectStats = (entries: SessionEntry[]): SessionStats => {
   };
 
   for (const entry of entries) {
+    const reconstruction = reconstructionFromEntry(entry);
+    if (reconstruction) {
+      addUsage(stats, reconstruction.callUsage);
+      stats.summaryTokens += reconstruction.callUsage.totalTokens;
+      continue;
+    }
     const openState = openStateFromEntry(entry);
     if (openState) {
       addUsage(stats, openState.callUsage);
@@ -726,6 +777,52 @@ export const conciseStep = (text: string, maxWords = 10): string => {
     .slice(0, maxWords)
     .join(" ")
     .replace(/[,:-]+$/, "");
+};
+
+interface RebuiltMilestone {
+  endRequest: number;
+  summary: string;
+  current: boolean;
+}
+
+const parseRebuiltMilestones = (
+  text: string,
+  requestCount: number,
+): RebuiltMilestone[] => {
+  const milestones = text
+    .split(/\r?\n/)
+    .flatMap((line) => {
+      const match = line.trim().match(/^(STEP|CURRENT)\s+(\d+)\s*\|\s*(.+)$/i);
+      const summary = conciseStep(match?.[3] ?? "");
+      return match && summary
+        ? [
+            {
+              endRequest: Number(match[2]),
+              summary,
+              current: match[1]?.toUpperCase() === "CURRENT",
+            },
+          ]
+        : [];
+    });
+  if (milestones.length < 2) return [];
+  let previous = 0;
+  for (const milestone of milestones) {
+    if (
+      milestone.endRequest <= previous ||
+      milestone.endRequest > requestCount
+    )
+      return [];
+    previous = milestone.endRequest;
+  }
+  if (
+    milestones.at(-1)?.endRequest !== requestCount ||
+    milestones.some(
+      (milestone, index) =>
+        milestone.current !== (index === milestones.length - 1),
+    )
+  )
+    return [];
+  return milestones;
 };
 
 export const readableGoal = (text: string): string => {
@@ -1870,6 +1967,185 @@ export default function minimapExtension(pi: ExtensionAPI) {
     state.steps.push(step);
   };
 
+  const rebuildUntrackedSession = async (
+    ctx: ExtensionContext,
+  ): Promise<"rebuilt" | "failed" | "busy" | undefined> => {
+    const branch = ctx.sessionManager.getBranch();
+    if (
+      !ctx.model ||
+      branch.some(
+        (entry) => stepFromEntry(entry) || reconstructionFromEntry(entry),
+      )
+    )
+      return undefined;
+    const generation = branchGeneration;
+    const requests = branch.flatMap((entry, index) => {
+      if (entry.type !== "message" || entry.message.role !== "user") return [];
+      const text = textContent(entry.message.content);
+      if (isStandaloneSkillInjection(text)) return [];
+      const summary = readableGoal(text);
+      return summary ? [{ entry, index, summary }] : [];
+    });
+    if (requests.length < 4) return undefined;
+    if (summaryRunning) {
+      summaryPending = true;
+      return "busy";
+    }
+
+    const failedRequests = new Set<number>();
+    const evidence = requests.map((request, index) => {
+      const nextIndex = requests[index + 1]?.index ?? branch.length;
+      const outcomeEntries = branch.slice(request.index + 1, nextIndex);
+      const assistants = outcomeEntries.flatMap((entry) =>
+        entry.type === "message" && entry.message.role === "assistant"
+          ? [entry.message]
+          : [],
+      );
+      const lastAssistant = assistants.at(-1);
+      const failed = lastAssistant
+        ? lastAssistant.stopReason === "error" ||
+          lastAssistant.stopReason === "aborted"
+        : outcomeEntries.some(
+            (entry) =>
+              entry.type === "message" &&
+              entry.message.role === "toolResult" &&
+              entry.message.isError,
+          );
+      if (failed) failedRequests.add(index + 1);
+      const outcome = assistants
+        .map((message) => conciseStep(textContent(message.content), 16))
+        .filter(Boolean)
+        .at(-1);
+      return `${index + 1}. Request: ${request.summary}\n   Outcome: ${
+        failed ? "Failed or incomplete" : (outcome ?? "No settled outcome recorded")
+      }`;
+    });
+
+    summaryRunning = true;
+    state.current = {
+      label: state.open?.summary ?? "Rebuilding session map",
+      tools: emptyCounts(),
+      errors: 0,
+    };
+    requestRender();
+    let callUsage = emptyUsage();
+    try {
+      const response = await ctx.modelRegistry.complete(
+        ctx.model,
+        {
+          systemPrompt: REBUILD_SYSTEM_PROMPT,
+          messages: [
+            {
+              role: "user",
+              content: [{ type: "text", text: evidence.join("\n") }],
+              timestamp: Date.now(),
+            },
+          ],
+        },
+        { cacheRetention: "none", maxTokens: 256 },
+      );
+      callUsage = usageSnapshot(response.usage);
+      if (response.stopReason === "error")
+        throw new Error(response.errorMessage || "model error");
+      const milestones = parseRebuiltMilestones(
+        textContent(response.content),
+        requests.length,
+      );
+      if (!milestones.length) throw new Error("invalid rebuilt session map");
+      for (const milestone of milestones.slice(0, -1)) {
+        if (failedRequests.has(milestone.endRequest))
+          throw new Error("failed request marked as completed");
+      }
+      if (generation !== branchGeneration) return "failed";
+
+      const finalBoundary = branch.map((entry) => entry.type).lastIndexOf("message");
+      if (finalBoundary < 0) return "failed";
+      const completed: MinimapStep[] = [];
+      let segmentStart = 0;
+      for (const milestone of milestones.slice(0, -1)) {
+        const nextRequest = requests[milestone.endRequest];
+        const segmentEnd = nextRequest ? nextRequest.index - 1 : finalBoundary;
+        const segment = branch.slice(segmentStart, segmentEnd + 1);
+        const stats = collectStepStats(segment);
+        completed.push({
+          version: STEP_VERSION,
+          throughEntryId: branch[segmentEnd]?.id ?? "",
+          summary: milestone.summary,
+          recovered: true,
+          tools: stats.tools,
+          skills: stats.skills,
+          decisions: [],
+          errors: stats.errors,
+          usage: stats.usage,
+          createdAt:
+            Date.parse(
+              segment.find(
+                (entry) =>
+                  entry.type === "message" && entry.message.role === "user",
+              )?.timestamp ?? "",
+            ) || 0,
+        });
+        segmentStart = segmentEnd + 1;
+      }
+      const contextWindow =
+        ctx.getContextUsage()?.contextWindow ?? ctx.model.contextWindow ?? 0;
+      const inferred = inferStepContexts(completed, branch, contextWindow);
+      const current = milestones.at(-1);
+      const currentSegment = branch.slice(segmentStart, finalBoundary + 1);
+      const currentStats = collectStepStats(currentSegment);
+      const nextOpen: OpenStep = {
+        summary: current?.summary ?? "Current session work",
+        throughEntryId: branch[finalBoundary]?.id ?? "",
+        tools: currentStats.tools,
+        skills: currentStats.skills,
+        decisions: [],
+        errors: currentStats.errors,
+        usage: currentStats.usage,
+        contextStart:
+          inferred.at(-1)?.contextEnd ??
+          state.open?.contextStart ??
+          snapshotContext(ctx),
+        contextEnd: snapshotContext(ctx),
+        createdAt:
+          Date.parse(
+            currentSegment.find(
+              (entry) =>
+                entry.type === "message" && entry.message.role === "user",
+            )?.timestamp ?? "",
+          ) || Date.now(),
+      };
+      const reconstruction: ReconstructionData = {
+        version: STEP_VERSION,
+        steps: inferred,
+        open: nextOpen,
+        callUsage,
+      };
+      pi.appendEntry(RECONSTRUCTION_ENTRY_TYPE, reconstruction);
+      state.steps = inferred;
+      state.open = nextOpen;
+      return "rebuilt";
+    } catch {
+      if (generation === branchGeneration) {
+        pi.appendEntry(STATE_ENTRY_TYPE, {
+          version: STEP_VERSION,
+          callUsage,
+          usageOnly: true,
+        });
+        if (ctx.hasUI)
+          ctx.ui.notify(
+            "Minimap history rebuild failed; it will retry after the next run",
+            "warning",
+          );
+      }
+      return "failed";
+    } finally {
+      summaryRunning = false;
+      state.current = undefined;
+      requestRender();
+    }
+  };
+
+
   const openPane = (ctx: ExtensionContext, hidden = false) => {
     if (ctx.mode !== "tui") return;
     paneContext = ctx;
@@ -2001,10 +2277,6 @@ export default function minimapExtension(pi: ExtensionAPI) {
       state.current = undefined;
       summaryRunning = false;
       requestRender();
-      if (summaryPending) {
-        summaryPending = false;
-        return updateSemanticMap(ctx);
-      }
       return false;
     }
     if (summaryFailed) {
@@ -2021,10 +2293,6 @@ export default function minimapExtension(pi: ExtensionAPI) {
       state.current = undefined;
       summaryRunning = false;
       requestRender();
-      if (summaryPending) {
-        summaryPending = false;
-        return updateSemanticMap(ctx);
-      }
       return false;
     }
 
@@ -2099,10 +2367,6 @@ export default function minimapExtension(pi: ExtensionAPI) {
     runContextStart = undefined;
     summaryRunning = false;
     requestRender();
-    if (summaryPending) {
-      summaryPending = false;
-      return updateSemanticMap(ctx);
-    }
     return true;
   };
 
@@ -2110,7 +2374,23 @@ export default function minimapExtension(pi: ExtensionAPI) {
     ctx: ExtensionContext,
   ): Promise<boolean> => {
     try {
-      return await updateSemanticMap(ctx);
+      while (true) {
+        const rebuilt = await rebuildUntrackedSession(ctx);
+        if (rebuilt === "busy") return false;
+        if (!rebuilt) {
+          const mapped = await updateSemanticMap(ctx);
+          if (summaryPending && !summaryRunning) {
+            summaryPending = false;
+            continue;
+          }
+          return mapped;
+        }
+        if (summaryPending) {
+          summaryPending = false;
+          continue;
+        }
+        return rebuilt === "rebuilt";
+      }
     } catch {
       summaryRunning = false;
       summaryPending = false;

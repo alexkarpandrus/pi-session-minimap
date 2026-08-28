@@ -1083,6 +1083,170 @@ test("step corrections preserve history while latest title wins", () => {
   );
 });
 
+test("lifecycle rebuilds long sessions that have no completed steps", async () => {
+  const snapshot = { ...usage(0, 0), cost: 0 };
+  const user = (id: string, parentId: string | null, content: string) =>
+    ({
+      type: "message",
+      id,
+      parentId,
+      timestamp: `2026-01-01T00:0${id.at(-1)}:00Z`,
+      message: { role: "user", content, timestamp: 1 },
+    }) as SessionEntry;
+  const assistant = (id: string, parentId: string) =>
+    ({
+      type: "message",
+      id,
+      parentId,
+      timestamp: `2026-01-01T00:0${id.at(-1)}:30Z`,
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: "Done" }],
+        api: "test",
+        provider: "test",
+        model: "test",
+        usage: usage(20, 2),
+        stopReason: "stop",
+        timestamp: 2,
+      },
+    }) as SessionEntry;
+  const branch = [
+    user("user-1", null, "Build the restaurant site"),
+    assistant("assistant-1", "user-1"),
+    {
+      type: "compaction",
+      id: "compact-1",
+      parentId: "assistant-1",
+      timestamp: "2026-01-01T00:01:45Z",
+      summary: "## Goal\nBuild the restaurant site",
+      firstKeptEntryId: "user-1",
+      tokensBefore: 90,
+    } as SessionEntry,
+    user("user-2", "compact-1", "Deploy the custom domain"),
+    assistant("assistant-2", "user-2"),
+    user("user-3", "assistant-2", "Add more restaurant sources"),
+    assistant("assistant-3", "user-3"),
+    user("user-4", "assistant-3", "Simplify the UI and add English"),
+    assistant("assistant-4", "user-4"),
+    {
+      type: "custom",
+      id: "checkpoint",
+      parentId: "assistant-4",
+      timestamp: "2026-01-01T00:05:00Z",
+      customType: "session-minimap-open-step",
+      data: {
+        version: 1,
+        callUsage: snapshot,
+        open: {
+          summary: "Build the restaurant site",
+          throughEntryId: "assistant-4",
+          tools: {},
+          skills: {},
+          decisions: [],
+          errors: 0,
+          usage: { ...usage(80, 8), cost: 0.08 },
+          contextStart: { tokens: 0, percent: 0, contextWindow: 100 },
+          contextEnd: { tokens: 80, percent: 80, contextWindow: 100 },
+          createdAt: 1,
+        },
+      },
+    },
+  ] as SessionEntry[];
+  type Handler = (event: unknown, ctx: ExtensionContext) => unknown;
+  const handlers = new Map<string, Handler>();
+  const appended: Array<{ type: string; data: unknown }> = [];
+  let completeCalls = 0;
+  let failReconstruction = true;
+  const ctx = {
+    mode: "rpc",
+    hasUI: false,
+    model: { contextWindow: 100 },
+    sessionManager: { getBranch: () => branch },
+    modelRegistry: {
+      complete: async () => {
+        completeCalls++;
+        return {
+          role: "assistant",
+          content: [
+            {
+              type: "text",
+              text: [
+                "STEP 1 | Build the restaurant menu MVP",
+                "STEP 2 | Deploy the custom production domain",
+                "STEP 3 | Expand supported restaurant menu sources",
+                "CURRENT 4 | Simplify and localize the user interface",
+              ].join("\n"),
+            },
+          ],
+          api: "test",
+          provider: "test",
+          model: "test",
+          usage: usage(1, 1),
+          stopReason: "stop",
+          timestamp: 1,
+        };
+      },
+    },
+    getContextUsage: () => ({ tokens: 80, percent: 80, contextWindow: 100 }),
+  } as unknown as ExtensionContext;
+  const pi = {
+    registerCommand: () => {},
+    registerShortcut: () => {},
+    on: (event: string, handler: Handler) => handlers.set(event, handler),
+    appendEntry: (type: string, data: unknown) => {
+      if (type === "session-minimap-reconstruction" && failReconstruction) {
+        failReconstruction = false;
+        throw new Error("persistence failed");
+      }
+      appended.push({ type, data });
+    },
+  } as unknown as ExtensionAPI;
+
+  minimapExtension(pi);
+  await handlers.get("session_start")?.({}, ctx);
+  await handlers.get("session_start")?.({}, ctx);
+
+  const reconstruction = appended.find(
+    (entry) => entry.type === "session-minimap-reconstruction",
+  );
+  const data = reconstruction?.data as {
+    steps: MinimapStep[];
+    open: { summary: string };
+  };
+  assert.deepEqual(
+    data.steps.map((step) => step.summary),
+    [
+      "Build the restaurant menu MVP",
+      "Deploy the custom production domain",
+      "Expand supported restaurant menu sources",
+    ],
+  );
+  assert.ok(data.steps.every((step) => step.recovered));
+  assert.equal(data.open.summary, "Simplify and localize the user interface");
+  assert.equal(
+    appended.filter((entry) => entry.type === "session-minimap-reconstruction")
+      .length,
+    1,
+  );
+
+  const persisted = {
+    type: "custom",
+    id: "reconstruction",
+    parentId: "checkpoint",
+    timestamp: "2026-01-01T00:06:00Z",
+    customType: "session-minimap-reconstruction",
+    data: reconstruction?.data,
+  } as SessionEntry;
+  const restored = restoreSavedState([...branch, persisted], 100);
+  assert.deepEqual(
+    restored.steps.map((step) => step.summary),
+    data.steps.map((step) => step.summary),
+  );
+  assert.equal(restored.open?.summary, data.open.summary);
+  assert.equal(collectStats([...branch, persisted]).summaryTokens, 2);
+  assert.equal(completeCalls, 2);
+});
+
 test("lifecycle reconciles on idle agent end and recovers update failures", async () => {
   const userEntry = (
     id: string,
@@ -1162,6 +1326,7 @@ test("lifecycle reconciles on idle agent end and recovers update failures", asyn
   assert.ok(end && settle && switchTree);
 
   const settlingA = Promise.resolve(settle({}, ctx));
+  await Promise.resolve();
   assert.equal(completeCalls, 1);
   branchName = "B";
   branch = [userEntry("b1", "Work on branch B")];
