@@ -2106,6 +2106,26 @@ export default function minimapExtension(pi: ExtensionAPI) {
     return true;
   };
 
+  const reconcileSemanticMap = async (
+    ctx: ExtensionContext,
+  ): Promise<boolean> => {
+    try {
+      return await updateSemanticMap(ctx);
+    } catch {
+      summaryRunning = false;
+      summaryPending = false;
+      state.current = undefined;
+      restore(ctx);
+      requestRender();
+      if (ctx.hasUI)
+        ctx.ui.notify(
+          "Minimap update failed; it will retry after the next run",
+          "warning",
+        );
+      return false;
+    }
+  };
+
   pi.registerCommand("minimap", {
     description: "Toggle the session minimap side pane",
     handler: async (_args, ctx) => {
@@ -2139,7 +2159,7 @@ export default function minimapExtension(pi: ExtensionAPI) {
     restore(ctx);
     openPane(ctx);
     requestRender();
-    await updateSemanticMap(ctx);
+    await reconcileSemanticMap(ctx);
   });
 
   pi.on("before_agent_start", (_event, ctx) => {
@@ -2171,10 +2191,14 @@ export default function minimapExtension(pi: ExtensionAPI) {
   pi.on("session_compact", (_event, _ctx) => requestRender());
   pi.on("model_select", (_event, _ctx) => requestRender());
 
+  pi.on("agent_end", async (_event, ctx) => {
+    if (ctx.isIdle()) await reconcileSemanticMap(ctx);
+  });
+
   pi.on("agent_settled", async (_event, ctx) => {
     let mapped = false;
     try {
-      mapped = await updateSemanticMap(ctx);
+      mapped = await reconcileSemanticMap(ctx);
     } finally {
       state.current = undefined;
       if (mapped) runContextStart = undefined;
@@ -2188,7 +2212,7 @@ export default function minimapExtension(pi: ExtensionAPI) {
     state.current = undefined;
     runContextStart = undefined;
     requestRender();
-    await updateSemanticMap(ctx);
+    await reconcileSemanticMap(ctx);
   });
 
   pi.on("session_shutdown", (event) => {

@@ -71,7 +71,7 @@ Related follow-ups, questions, retries, and refinements stay in one broad semant
 
 Completed steps are append-only. The open step is checkpointed for resume. Later factual title corrections are stored as overlays, so the original history stays unchanged.
 
-The extension uses the currently selected model to classify semantic boundaries. It stores compact metadata in the pi session file. It does not capture keyboard input or take terminal focus.
+The extension re-evaluates the map when each agent run becomes idle and again when the agent fully settles. It uses the currently selected model to classify semantic boundaries, stores compact metadata in the pi session file, and never takes terminal focus.
 
 ## Development
 

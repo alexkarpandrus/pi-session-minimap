@@ -1083,7 +1083,7 @@ test("step corrections preserve history while latest title wins", () => {
   );
 });
 
-test("lifecycle discards stale branch summaries and reports failures", async () => {
+test("lifecycle reconciles on idle agent end and recovers update failures", async () => {
   const userEntry = (
     id: string,
     content: string,
@@ -1117,6 +1117,7 @@ test("lifecycle discards stale branch summaries and reports failures", async () 
   let branchName = "A";
   let branch = [userEntry("a1", "Work on branch A")];
   let completeCalls = 0;
+  let failAppend = false;
   let resolveFirst = (_response: Completion) => {};
   const firstResponse = new Promise<Completion>((resolve) => {
     resolveFirst = resolve;
@@ -1132,25 +1133,33 @@ test("lifecycle discards stale branch summaries and reports failures", async () 
         completeCalls++;
         if (completeCalls === 1) return firstResponse;
         if (completeCalls === 2) return completion("NEW\nBranch B");
-        return completion("", "error");
+        if (completeCalls === 3) return completion("", "error");
+        return completion("CONTINUE\nBranch B recovered");
       },
     },
     getContextUsage: () => ({ tokens: 10, percent: 10, contextWindow: 100 }),
+    isIdle: () => true,
     ui: { notify: (message: string) => notices.push(message) },
   } as unknown as ExtensionContext;
   const pi = {
     registerCommand: (name: string) => commands.push(name),
     registerShortcut: () => {},
     on: (event: string, handler: Handler) => handlers.set(event, handler),
-    appendEntry: (type: string, data: unknown) =>
-      appended.push({ branch: branchName, type, data }),
+    appendEntry: (type: string, data: unknown) => {
+      if (failAppend) {
+        failAppend = false;
+        throw new Error("persistence failed");
+      }
+      appended.push({ branch: branchName, type, data });
+    },
   } as unknown as ExtensionAPI;
 
   minimapExtension(pi);
   assert.ok(commands.includes("minimap"));
+  const end = handlers.get("agent_end");
   const settle = handlers.get("agent_settled");
   const switchTree = handlers.get("session_tree");
-  assert.ok(settle && switchTree);
+  assert.ok(end && settle && switchTree);
 
   const settlingA = Promise.resolve(settle({}, ctx));
   assert.equal(completeCalls, 1);
@@ -1166,10 +1175,24 @@ test("lifecycle discards stale branch summaries and reports failures", async () 
   assert.equal(JSON.stringify(appended).includes("Branch B"), true);
 
   branch = [...branch, userEntry("b2", "Retry branch B", "b1")];
-  await settle({}, ctx);
+  await end({}, ctx);
   assert.equal(completeCalls, 3);
   assert.deepEqual(notices, [
     "Minimap summary failed; it will retry after the next run",
+  ]);
+
+  branch = [...branch, userEntry("b3", "Finish branch B", "b2")];
+  failAppend = true;
+  await settle({}, ctx);
+  assert.equal(completeCalls, 4);
+  await settle({}, ctx);
+  assert.equal(completeCalls, 5);
+  assert.equal(JSON.stringify(appended.at(-1)?.data).includes("recovered"), true);
+  await settle({}, ctx);
+  assert.equal(completeCalls, 5);
+  assert.deepEqual(notices, [
+    "Minimap summary failed; it will retry after the next run",
+    "Minimap update failed; it will retry after the next run",
   ]);
   assert.equal(
     Object.hasOwn(appended.at(-1)?.data as object, "summaryError"),
