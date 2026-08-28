@@ -1352,7 +1352,10 @@ test("lifecycle reconciles on idle agent end and recovers update failures", asyn
   assert.equal(completeCalls, 4);
   await settle({}, ctx);
   assert.equal(completeCalls, 5);
-  assert.equal(JSON.stringify(appended.at(-1)?.data).includes("recovered"), true);
+  assert.equal(
+    JSON.stringify(appended.at(-1)?.data).includes("recovered"),
+    true,
+  );
   await settle({}, ctx);
   assert.equal(completeCalls, 5);
   assert.deepEqual(notices, [

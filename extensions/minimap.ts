@@ -789,28 +789,23 @@ const parseRebuiltMilestones = (
   text: string,
   requestCount: number,
 ): RebuiltMilestone[] => {
-  const milestones = text
-    .split(/\r?\n/)
-    .flatMap((line) => {
-      const match = line.trim().match(/^(STEP|CURRENT)\s+(\d+)\s*\|\s*(.+)$/i);
-      const summary = conciseStep(match?.[3] ?? "");
-      return match && summary
-        ? [
-            {
-              endRequest: Number(match[2]),
-              summary,
-              current: match[1]?.toUpperCase() === "CURRENT",
-            },
-          ]
-        : [];
-    });
+  const milestones = text.split(/\r?\n/).flatMap((line) => {
+    const match = line.trim().match(/^(STEP|CURRENT)\s+(\d+)\s*\|\s*(.+)$/i);
+    const summary = conciseStep(match?.[3] ?? "");
+    return match && summary
+      ? [
+          {
+            endRequest: Number(match[2]),
+            summary,
+            current: match[1]?.toUpperCase() === "CURRENT",
+          },
+        ]
+      : [];
+  });
   if (milestones.length < 2) return [];
   let previous = 0;
   for (const milestone of milestones) {
-    if (
-      milestone.endRequest <= previous ||
-      milestone.endRequest > requestCount
-    )
+    if (milestone.endRequest <= previous || milestone.endRequest > requestCount)
       return [];
     previous = milestone.endRequest;
   }
@@ -2017,7 +2012,9 @@ export default function minimapExtension(pi: ExtensionAPI) {
         .filter(Boolean)
         .at(-1);
       return `${index + 1}. Request: ${request.summary}\n   Outcome: ${
-        failed ? "Failed or incomplete" : (outcome ?? "No settled outcome recorded")
+        failed
+          ? "Failed or incomplete"
+          : (outcome ?? "No settled outcome recorded")
       }`;
     });
 
@@ -2058,7 +2055,9 @@ export default function minimapExtension(pi: ExtensionAPI) {
       }
       if (generation !== branchGeneration) return "failed";
 
-      const finalBoundary = branch.map((entry) => entry.type).lastIndexOf("message");
+      const finalBoundary = branch
+        .map((entry) => entry.type)
+        .lastIndexOf("message");
       if (finalBoundary < 0) return "failed";
       const completed: MinimapStep[] = [];
       let segmentStart = 0;
@@ -2144,7 +2143,6 @@ export default function minimapExtension(pi: ExtensionAPI) {
       requestRender();
     }
   };
-
 
   const openPane = (ctx: ExtensionContext, hidden = false) => {
     if (ctx.mode !== "tui") return;
