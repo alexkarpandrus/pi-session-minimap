@@ -76,7 +76,7 @@ export interface MinimapStep {
   recovered?: true;
 }
 
-export interface StepCorrection {
+interface StepCorrection {
   version: 1;
   throughEntryId: string;
   summary: string;
@@ -264,11 +264,18 @@ export const restoreSavedState = (
         ),
       )
     : Number.MAX_SAFE_INTEGER;
+  const firstCheckpointIndex = branch.findIndex(
+    (entry) => entry.type === "custom" && entry.customType === STATE_ENTRY_TYPE,
+  );
+  const recoveryBoundary = Math.min(
+    firstPersistedIndex,
+    firstCheckpointIndex < 0 ? Number.MAX_SAFE_INTEGER : firstCheckpointIndex,
+  );
   const recoveredPrefix = recoverHistoricalSteps(branch, contextWindow).filter(
     (step) =>
       !persistedIds.has(step.throughEntryId) &&
       (entryIndexes.get(step.throughEntryId) ?? Number.MAX_SAFE_INTEGER) <
-        firstPersistedIndex,
+        recoveryBoundary,
   );
   const steps = inferStepContexts(
     [...recoveredPrefix, ...persisted],

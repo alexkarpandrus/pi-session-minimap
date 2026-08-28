@@ -143,6 +143,7 @@ test("finalized steps close matching restored checkpoints", () => {
     summary,
     throughEntryId,
     tools: {},
+    skills: {},
     errors: 0,
     usage: snapshot,
     contextStart: { tokens: 10, percent: 10, contextWindow: 100 },
@@ -200,6 +201,67 @@ test("finalized steps close matching restored checkpoints", () => {
   assert.equal(
     restoreSavedState([oldOpen, finalized, newOpen]).open?.summary,
     "New goal",
+  );
+
+  const checkpointBefore = custom(
+    "checkpoint-before",
+    "session-minimap-open-step",
+    {
+      version: 1,
+      callUsage: snapshot,
+      open: open("Spanning goal", "result-before"),
+    },
+  );
+  const compaction = {
+    type: "compaction",
+    id: "compact-covered",
+    parentId: "checkpoint-before",
+    timestamp: "2026-01-01T00:00:01Z",
+    summary: "## Goal\nSpanning goal",
+    firstKeptEntryId: "result-covered",
+    tokensBefore: 80,
+  } as SessionEntry;
+  const resultCovered = {
+    type: "message",
+    id: "result-covered",
+    parentId: "compact-covered",
+    timestamp: "2026-01-01T00:00:02Z",
+    message: {
+      role: "assistant",
+      content: [],
+      api: "test",
+      provider: "test",
+      model: "test",
+      usage: usage(10, 2),
+      stopReason: "stop",
+      timestamp: 2,
+    },
+  } as SessionEntry;
+  const checkpointAfter = custom(
+    "checkpoint-after",
+    "session-minimap-open-step",
+    {
+      version: 1,
+      callUsage: snapshot,
+      open: open("Spanning goal", "result-covered"),
+    },
+  );
+  const coveredStep = custom("covered-step", "session-minimap-step", {
+    version: 1,
+    throughEntryId: "result-covered",
+    summary: "Spanning goal",
+    tools: {},
+    errors: 0,
+    usage: snapshot,
+    createdAt: 2,
+  });
+  const covered = restoreSavedState(
+    [checkpointBefore, compaction, resultCovered, checkpointAfter, coveredStep],
+    100,
+  );
+  assert.deepEqual(
+    covered.steps.map((step) => [step.summary, step.recovered]),
+    [["Spanning goal", undefined]],
   );
 });
 
