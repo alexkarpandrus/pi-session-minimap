@@ -70,11 +70,9 @@ export interface MinimapStep {
   decisions?: string[];
   errors: number;
   usage: UsageSnapshot;
-  summaryUsage: UsageSnapshot;
   contextStart?: ContextSnapshot;
   contextEnd?: ContextSnapshot;
   createdAt: number;
-  summaryError?: string;
   recovered?: true;
 }
 
@@ -104,7 +102,6 @@ interface OpenStateData {
   closed?: true;
   usageOnly?: true;
   callUsage: UsageSnapshot;
-  summaryError?: string;
 }
 
 interface SessionStats extends UsageSnapshot {
@@ -175,7 +172,6 @@ const isMinimapStep = (value: unknown): value is MinimapStep => {
     typeof step.summary === "string" &&
     typeof step.createdAt === "number" &&
     !!step.usage &&
-    !!step.summaryUsage &&
     !!step.tools
   );
 };
@@ -241,19 +237,44 @@ const openStateFromEntry = (entry: SessionEntry): OpenStateData | undefined =>
 
 export const restoreSavedState = (
   branch: SessionEntry[],
+  contextWindow = 0,
 ): Pick<ViewState, "steps" | "open"> => {
-  const steps: MinimapStep[] = [];
+  const persisted: MinimapStep[] = [];
   let open: OpenStep | undefined;
   for (const entry of branch) {
     const step = stepFromEntry(entry);
     if (step) {
-      steps.push(step);
+      persisted.push(step);
       if (open?.throughEntryId === step.throughEntryId) open = undefined;
     }
     const checkpoint = openStateFromEntry(entry);
     if (checkpoint && !checkpoint.usageOnly)
       open = checkpoint.closed ? undefined : checkpoint.open;
   }
+
+  const entryIndexes = new Map(
+    branch.map((entry, index) => [entry.id, index]),
+  );
+  const persistedIds = new Set(persisted.map((step) => step.throughEntryId));
+  const firstPersistedIndex = persisted.length
+    ? Math.min(
+        ...persisted.map(
+          (step) =>
+            entryIndexes.get(step.throughEntryId) ?? Number.MAX_SAFE_INTEGER,
+        ),
+      )
+    : Number.MAX_SAFE_INTEGER;
+  const recoveredPrefix = recoverHistoricalSteps(branch, contextWindow).filter(
+    (step) =>
+      !persistedIds.has(step.throughEntryId) &&
+      (entryIndexes.get(step.throughEntryId) ?? Number.MAX_SAFE_INTEGER) <
+        firstPersistedIndex,
+  );
+  const steps = inferStepContexts(
+    [...recoveredPrefix, ...persisted],
+    branch,
+    contextWindow,
+  );
   return { steps, open };
 };
 
@@ -382,11 +403,7 @@ export const collectStats = (entries: SessionEntry[]): SessionStats => {
       continue;
     }
     const step = stepFromEntry(entry);
-    if (step) {
-      addUsage(stats, step.summaryUsage);
-      stats.summaryTokens += step.summaryUsage.totalTokens;
-      continue;
-    }
+    if (step) continue;
     if (entry.type !== "message") continue;
 
     if (entry.message.role === "assistant") {
@@ -900,7 +917,6 @@ export const recoverHistoricalSteps = (
         totalTokens: stats.totalTokens,
         cost: stats.cost,
       },
-      summaryUsage: emptyUsage(),
       createdAt: Date.parse(boundary.timestamp) || 0,
     });
     segmentStart = index + 1;
@@ -1040,12 +1056,17 @@ export const compactMetrics = (
     | "agentTokens"
     | "summaryTokens"
     | "tools"
+    | "skills"
     | "errors"
   >,
   contextPercent?: number | null,
   resetCount = 0,
 ): [string, string] => {
   const calls = Object.values(stats.tools).reduce(
+    (total, count) => total + count,
+    0,
+  );
+  const skills = Object.values(stats.skills).reduce(
     (total, count) => total + count,
     0,
   );
@@ -1058,23 +1079,10 @@ export const compactMetrics = (
   const contextMeter = `${"▓".repeat(filled)}${"░".repeat(6 - filled)}`;
   return [
     `tok ${fmt(stats.input)}→${fmt(stats.output)} · $${stats.cost.toFixed(2)} · ctx now${percent == null ? "?" : `${percent}%`} ${contextMeter}`,
-    `work agent${fmt(stats.agentTokens)} · minimap${fmt(stats.summaryTokens)} · calls${fmt(calls)} · err${stats.errors}${resetMetric}`,
+    `work agent${fmt(stats.agentTokens)} · minimap${fmt(stats.summaryTokens)} · calls${fmt(calls)} · skills${fmt(skills)} · err${stats.errors}${resetMetric}`,
   ];
 };
 
-export const contextResetLabel = (reset: ContextReset): string => {
-  const usePercent = reset.beforePercent != null;
-  const before = usePercent
-    ? String(Math.round(reset.beforePercent ?? 0))
-    : fmt(reset.beforeTokens);
-  let after: string | undefined;
-  if (usePercent && reset.afterPercent != null)
-    after = String(Math.round(reset.afterPercent));
-  if (!usePercent && reset.afterTokens != null) after = fmt(reset.afterTokens);
-  const overflow =
-    usePercent && (reset.beforePercent ?? 0) > 100 ? "overflow " : "";
-  return `${overflow}${after ? `${before}→${after}` : `at ${before}`}${usePercent ? "%" : ""}`;
-};
 
 const resetCountLabel = (resets: ContextReset[]): string => {
   if (!resets.length) return "";
@@ -1133,6 +1141,34 @@ export const dashboardContextLabel = (
   return "?";
 };
 
+const paneFrame = (theme: Theme, width: number) => {
+  const inner = Math.max(12, width) - 2;
+  const paint = (line: string) => theme.bg("customMessageBg", line);
+  const border = (left: string, fill: string, right: string) =>
+    paint(theme.fg("border", `${left}${fill.repeat(inner)}${right}`));
+  const row = (content = "") => {
+    const clipped = truncateToWidth(content, inner, "");
+    return paint(
+      theme.fg("border", "│") +
+        clipped +
+        " ".repeat(Math.max(0, inner - visibleWidth(clipped))) +
+        theme.fg("border", "│"),
+    );
+  };
+  const wrappedRows = (
+    prefix: string,
+    value: string,
+    prefixStyle: (text: string) => string,
+    valueStyle: (text: string) => string,
+  ) =>
+    wrapStepSummary(value, inner - visibleWidth(prefix)).map((line, index) =>
+      row(
+        `${index === 0 ? prefixStyle(prefix) : " ".repeat(visibleWidth(prefix))}${valueStyle(line)}`,
+      ),
+    );
+  return { inner, border, row, wrappedRows };
+};
+
 class MinimapPane implements Component {
   private readonly tui: TUI;
   private readonly theme: Theme;
@@ -1178,31 +1214,8 @@ class MinimapPane implements Component {
   }
 
   private renderExpanded(width: number): string[] {
-    const inner = Math.max(12, width) - 2;
     const th = this.theme;
-    const paint = (line: string) => th.bg("customMessageBg", line);
-    const border = (left: string, fill: string, right: string) =>
-      paint(th.fg("border", `${left}${fill.repeat(inner)}${right}`));
-    const row = (content = "") => {
-      const clipped = truncateToWidth(content, inner, "");
-      return paint(
-        th.fg("border", "│") +
-          clipped +
-          " ".repeat(Math.max(0, inner - visibleWidth(clipped))) +
-          th.fg("border", "│"),
-      );
-    };
-    const wrappedRows = (
-      prefix: string,
-      value: string,
-      prefixStyle: (text: string) => string,
-      valueStyle: (text: string) => string,
-    ) =>
-      wrapStepSummary(value, inner - visibleWidth(prefix)).map((line, index) =>
-        row(
-          `${index === 0 ? prefixStyle(prefix) : " ".repeat(visibleWidth(prefix))}${valueStyle(line)}`,
-        ),
-      );
+    const { inner, border, row, wrappedRows } = paneFrame(th, width);
     const cell = (value: string, size: number, right = false) => {
       const clipped = truncateToWidth(value, size, "");
       const padding = " ".repeat(Math.max(0, size - visibleWidth(clipped)));
@@ -1433,11 +1446,35 @@ class MinimapPane implements Component {
       border("├", "─", "┤"),
       ...wrappedRows(
         " Session ",
-        `${elapsedLabel(efficiency.elapsedMs)} elapsed · $${stats.cost.toFixed(2)} session · ${fmt(stats.agentTokens)} agent tok · ${fmt(stats.summaryTokens)} map (${efficiency.mapOverhead.toFixed(2)}%) · ${efficiency.cacheShare.toFixed(0)}% cache share`,
+        `${elapsedLabel(efficiency.elapsedMs)} elapsed · $${stats.cost.toFixed(2)} session · ${fmt(stats.input)}→${fmt(stats.output)} tok · ${fmt(stats.agentTokens)} agent · ${fmt(stats.summaryTokens)} map (${efficiency.mapOverhead.toFixed(2)}%) · ${efficiency.cacheShare.toFixed(0)}% cache`,
         (value) => th.fg("muted", value),
         (value) => th.fg("text", value),
       ),
     );
+    const nestedTokens = Object.entries(stats.toolTokens)
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+      .slice(0, 3)
+      .map(([name, tokens]) => `${oneLine(name, 24)} ${fmt(tokens)}`)
+      .join(" · ");
+    if (nestedTokens)
+      history.push(
+        ...wrappedRows(
+          " Nested tokens ",
+          nestedTokens,
+          (value) => th.fg("muted", value),
+          (value) => th.fg("text", value),
+        ),
+      );
+    const skillCounts = topCounts(stats.skills, 3);
+    if (skillCounts)
+      history.push(
+        ...wrappedRows(
+          " Skills ",
+          skillCounts,
+          (value) => th.fg("muted", value),
+          (value) => th.fg("text", value),
+        ),
+      );
     if (review.total) {
       history.push(
         ...wrappedRows(
@@ -1559,31 +1596,8 @@ class MinimapPane implements Component {
 
   render(width: number): string[] {
     if (this.expanded) return this.renderExpanded(width);
-    const inner = Math.max(12, width) - 2;
     const th = this.theme;
-    const paint = (line: string) => th.bg("customMessageBg", line);
-    const border = (left: string, fill: string, right: string) =>
-      paint(th.fg("border", `${left}${fill.repeat(inner)}${right}`));
-    const row = (content = "") => {
-      const clipped = truncateToWidth(content, inner, "");
-      return paint(
-        th.fg("border", "│") +
-          clipped +
-          " ".repeat(Math.max(0, inner - visibleWidth(clipped))) +
-          th.fg("border", "│"),
-      );
-    };
-    const wrappedRows = (
-      prefix: string,
-      value: string,
-      prefixStyle: (text: string) => string,
-      valueStyle: (text: string) => string,
-    ) =>
-      wrapStepSummary(value, inner - visibleWidth(prefix)).map((line, index) =>
-        row(
-          `${index === 0 ? prefixStyle(prefix) : " ".repeat(visibleWidth(prefix))}${valueStyle(line)}`,
-        ),
-      );
+    const { inner, border, row, wrappedRows } = paneFrame(th, width);
     const contextLabel = (
       start?: ContextSnapshot,
       end?: ContextSnapshot,
@@ -1693,13 +1707,9 @@ class MinimapPane implements Component {
       Boolean(this.state.open),
     );
     const liveSummary = this.state.current?.label ?? this.state.open?.summary;
-    const percent =
-      context?.percent == null ? "?" : String(Math.round(context.percent));
-    const summary = `ctx ${percent}% ${resetCountLabel(resets)} · $${stats.cost.toFixed(2)} session · ${fmt(stats.agentTokens)} tok · ${stats.errors} errors`;
     const header = [
       border("╭", "─", "╮"),
       row(` ${th.bold(th.fg("accent", "Session minimap"))}`),
-      row(` ${th.fg("muted", summary)}`),
     ];
     if (liveSummary) {
       header.push(
@@ -1732,6 +1742,15 @@ class MinimapPane implements Component {
     } else {
       header.push(row(` ○ ${th.fg("muted", "Idle")}`));
     }
+    for (const metric of compactMetrics(stats, context?.percent, resets.length))
+      header.push(
+        ...wrappedRows(
+          " ",
+          metric,
+          (value) => value,
+          (value) => th.fg("muted", value),
+        ),
+      );
     header.push(border("├", "─", "┤"));
 
     const footerRows = 3;
@@ -1781,6 +1800,7 @@ export default function minimapExtension(pi: ExtensionAPI) {
   let requestRender = () => {};
   let summaryRunning = false;
   let summaryPending = false;
+  let branchGeneration = 0;
   let runContextStart: ContextSnapshot | undefined;
   let expanded = false;
   let paneContext: ExtensionContext | undefined;
@@ -1815,29 +1835,22 @@ export default function minimapExtension(pi: ExtensionAPI) {
 
   const restore = (ctx: ExtensionContext) => {
     const branch = ctx.sessionManager.getBranch();
-    const restored = restoreSavedState(branch);
-    state.steps = restored.steps;
+    const restored = restoreSavedState(
+      branch,
+      ctx.model?.contextWindow ?? 0,
+    );
+    state.steps = applyStepCorrections(restored.steps, branch);
     state.open = restored.open;
-    const contextWindow = ctx.model?.contextWindow ?? 0;
-    if (state.steps.length)
-      state.steps = inferStepContexts(state.steps, branch, contextWindow);
-    else state.steps = recoverHistoricalSteps(branch, contextWindow);
-    state.steps = applyStepCorrections(state.steps, branch);
   };
 
-  const appendOpenState = (
-    callUsage: UsageSnapshot,
-    summaryError?: string,
-    closed = false,
-  ) => {
+  const appendOpenState = (callUsage: UsageSnapshot, closed = false) => {
     const data: OpenStateData = { version: STEP_VERSION, callUsage };
     if (closed) data.closed = true;
     else if (state.open) data.open = state.open;
-    if (summaryError) data.summaryError = summaryError;
     pi.appendEntry(STATE_ENTRY_TYPE, data);
   };
 
-  const finalizeOpen = (open: OpenStep, summaryError?: string) => {
+  const finalizeOpen = (open: OpenStep) => {
     const step: MinimapStep = {
       version: STEP_VERSION,
       throughEntryId: open.throughEntryId,
@@ -1847,12 +1860,10 @@ export default function minimapExtension(pi: ExtensionAPI) {
       decisions: open.decisions,
       errors: open.errors,
       usage: open.usage,
-      summaryUsage: emptyUsage(),
       contextStart: open.contextStart,
       contextEnd: open.contextEnd,
       createdAt: open.createdAt,
     };
-    if (summaryError) step.summaryError = summaryError;
     pi.appendEntry(ENTRY_TYPE, step);
     state.steps.push(step);
   };
@@ -1907,6 +1918,7 @@ export default function minimapExtension(pi: ExtensionAPI) {
       return false;
     }
     if (!ctx.model) return false;
+    const generation = branchGeneration;
     const branch = ctx.sessionManager.getBranch();
     const previousThrough =
       state.open?.throughEntryId ?? state.steps.at(-1)?.throughEntryId;
@@ -1940,7 +1952,7 @@ export default function minimapExtension(pi: ExtensionAPI) {
       corrections: [] as { step: number; summary: string }[],
     };
     let callUsage = emptyUsage();
-    let summaryError: string | undefined;
+    let summaryFailed = false;
     try {
       const prompt = [
         "CURRENT STEP:",
@@ -1981,15 +1993,29 @@ export default function minimapExtension(pi: ExtensionAPI) {
       );
       if (!decision.summary) throw new Error("empty model response");
     } catch {
-      summaryError = "summary failed";
+      summaryFailed = true;
     }
-    if (summaryError) {
+    if (generation !== branchGeneration) {
+      state.current = undefined;
+      summaryRunning = false;
+      requestRender();
+      if (summaryPending) {
+        summaryPending = false;
+        return updateSemanticMap(ctx);
+      }
+      return false;
+    }
+    if (summaryFailed) {
       pi.appendEntry(STATE_ENTRY_TYPE, {
         version: STEP_VERSION,
         callUsage,
         usageOnly: true,
-        summaryError,
       });
+      if (ctx.hasUI)
+        ctx.ui.notify(
+          "Minimap summary failed; it will retry after the next run",
+          "warning",
+        );
       state.current = undefined;
       summaryRunning = false;
       requestRender();
@@ -2024,7 +2050,7 @@ export default function minimapExtension(pi: ExtensionAPI) {
 
     if (decision.startsNewStep && state.open) {
       const semanticStart = state.open.contextEnd;
-      finalizeOpen(state.open, summaryError);
+      finalizeOpen(state.open);
       state.open = {
         summary: decision.summary,
         throughEntryId,
@@ -2066,7 +2092,7 @@ export default function minimapExtension(pi: ExtensionAPI) {
       };
     }
 
-    appendOpenState(callUsage, summaryError);
+    appendOpenState(callUsage);
     state.current = undefined;
     runContextStart = undefined;
     summaryRunning = false;
@@ -2107,6 +2133,7 @@ export default function minimapExtension(pi: ExtensionAPI) {
   });
 
   pi.on("session_start", async (_event, ctx) => {
+    branchGeneration++;
     restore(ctx);
     openPane(ctx);
     requestRender();
@@ -2154,6 +2181,7 @@ export default function minimapExtension(pi: ExtensionAPI) {
   });
 
   pi.on("session_tree", async (_event, ctx) => {
+    branchGeneration++;
     restore(ctx);
     state.current = undefined;
     runContextStart = undefined;
@@ -2165,7 +2193,7 @@ export default function minimapExtension(pi: ExtensionAPI) {
     if (event.reason !== "reload" && state.open) {
       finalizeOpen(state.open);
       state.open = undefined;
-      appendOpenState(emptyUsage(), undefined, true);
+      appendOpenState(emptyUsage(), true);
     }
     closePane?.();
     closePane = undefined;

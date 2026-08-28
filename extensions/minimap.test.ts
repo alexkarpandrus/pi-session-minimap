@@ -1,8 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { SessionEntry } from "@earendil-works/pi-coding-agent";
+import type {
+  ExtensionAPI,
+  ExtensionContext,
+  SessionEntry,
+} from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import {
+import minimapExtension, {
   alignScrollStart,
   applyStepCorrections,
   categorizeError,
@@ -10,7 +14,6 @@ import {
   collectContextResets,
   compactMetrics,
   contextRangeLabel,
-  contextResetLabel,
   dashboardContextLabel,
   conciseStep,
   entriesAfter,
@@ -85,6 +88,18 @@ const entries = [
   },
   {
     type: "custom",
+    id: "summary",
+    parentId: "result",
+    timestamp: "2026-01-01T00:00:03Z",
+    customType: "session-minimap-open-step",
+    data: {
+      version: 1,
+      callUsage: { ...usage(8, 4), cost: 0.003 },
+      usageOnly: true,
+    },
+  },
+  {
+    type: "custom",
     id: "step",
     parentId: "result",
     timestamp: "2026-01-01T00:00:03Z",
@@ -96,7 +111,6 @@ const entries = [
       tools: { read: 1 },
       errors: 1,
       usage: { ...usage(110, 22), cost: 0.02 },
-      summaryUsage: { ...usage(8, 4), cost: 0.003 },
       createdAt: 4,
     } satisfies MinimapStep,
   },
@@ -118,7 +132,7 @@ test("collectStats separates agent and minimap usage", () => {
 test("entriesAfter keeps append-only step boundaries", () => {
   assert.deepEqual(
     entriesAfter(entries, "result").map((entry) => entry.id),
-    ["step"],
+    ["summary", "step"],
   );
   assert.equal(entriesAfter(entries, "missing").length, entries.length);
 });
@@ -160,7 +174,6 @@ test("finalized steps close matching restored checkpoints", () => {
     tools: {},
     errors: 0,
     usage: snapshot,
-    summaryUsage: snapshot,
     createdAt: 1,
   });
   const newOpen = custom("open-new", "session-minimap-open-step", {
@@ -175,7 +188,6 @@ test("finalized steps close matching restored checkpoints", () => {
       version: 1,
       callUsage: { ...usage(3, 2), cost: 0 },
       usageOnly: true,
-      summaryError: "summary failed",
     },
   );
 
@@ -453,7 +465,6 @@ test("legacy steps get context ranges without rewriting entries", () => {
     tools: { read: 1 },
     errors: 1,
     usage: { ...usage(110, 22), cost: 0.02 },
-    summaryUsage: { ...usage(8, 4), cost: 0.003 },
     createdAt: 4,
   };
 
@@ -658,6 +669,7 @@ test("compact metrics preserve live totals in two rows", () => {
         agentTokens: 55_500_000,
         summaryTokens: 5_100,
         tools: { read: 155, bash: 109 },
+        skills: { tdd: 2 },
         errors: 13,
       },
       49,
@@ -665,7 +677,7 @@ test("compact metrics preserve live totals in two rows", () => {
     ),
     [
       "tok 1.9m→157k · $44.02 · ctx now49% ▓▓▓░░░",
-      "work agent55.5m · minimap5.1k · calls264 · err13 · ↻3",
+      "work agent55.5m · minimap5.1k · calls264 · skills2 · err13 · ↻3",
     ],
   );
 });
@@ -769,18 +781,6 @@ test("current context only fills the latest unresolved compaction", () => {
   assert.equal(resets[1]?.afterTokens, 25);
 });
 
-test("context reset labels identify overflow", () => {
-  assert.equal(
-    contextResetLabel({
-      entryIndex: 0,
-      beforeTokens: 290,
-      afterTokens: 44,
-      beforePercent: 145,
-      afterPercent: 22,
-    }),
-    "overflow 145→22%",
-  );
-});
 
 test("settled semantic threads are not shown as active work", () => {
   assert.equal(minimapStatus(true, true), "active");
@@ -882,6 +882,49 @@ test("legacy sessions recover compaction-bounded steps", () => {
       },
     ],
   );
+
+  const restored = restoreSavedState(
+    [
+      ...legacyEntries,
+      {
+        type: "message",
+        id: "assistant-3",
+        parentId: "compact-2",
+        timestamp: "2026-01-01T00:00:06Z",
+        message: {
+          role: "assistant",
+          content: [],
+          api: "test",
+          provider: "test",
+          model: "test",
+          usage: usage(10, 2),
+          stopReason: "stop",
+          timestamp: 6,
+        },
+      },
+      {
+        type: "custom",
+        id: "step-3",
+        parentId: "assistant-3",
+        timestamp: "2026-01-01T00:00:07Z",
+        customType: "session-minimap-step",
+        data: {
+          version: 1,
+          throughEntryId: "assistant-3",
+          summary: "Ship the minimap",
+          tools: {},
+          errors: 0,
+          usage: { ...usage(10, 2), cost: 0.01 },
+          createdAt: 7,
+        } satisfies MinimapStep,
+      },
+    ] as SessionEntry[],
+    100,
+  );
+  assert.deepEqual(
+    restored.steps.map((step) => step.summary),
+    ["Build login flow", "Tune caching policy", "Ship the minimap"],
+  );
 });
 
 test("legacy recovery replaces generic continuation prompts with compaction goals", () => {
@@ -922,7 +965,6 @@ test("step corrections preserve history while latest title wins", () => {
     tools: {},
     errors: 0,
     usage: { ...usage(0, 0), cost: 0 },
-    summaryUsage: { ...usage(0, 0), cost: 0 },
     createdAt: 1,
   } satisfies MinimapStep;
   const corrections = [
@@ -962,5 +1004,99 @@ test("step corrections preserve history while latest title wins", () => {
   assert.equal(
     step.summary,
     "Improving minimap density with cached AgentsView health data",
+  );
+});
+
+test("lifecycle discards stale branch summaries and reports failures", async () => {
+  const userEntry = (
+    id: string,
+    content: string,
+    parentId: string | null = null,
+  ): SessionEntry =>
+    ({
+      type: "message",
+      id,
+      parentId,
+      timestamp: "2026-01-01T00:00:00Z",
+      message: { role: "user", content, timestamp: 1 },
+    }) as SessionEntry;
+  const completion = (text: string, stopReason: "stop" | "error" = "stop") => ({
+    role: "assistant" as const,
+    content: text ? [{ type: "text" as const, text }] : [],
+    api: "test",
+    provider: "test",
+    model: "test",
+    usage: usage(1, 1),
+    stopReason,
+    errorMessage: stopReason === "error" ? "provider failed" : undefined,
+    timestamp: 1,
+  });
+  type Handler = (event: unknown, ctx: ExtensionContext) => unknown;
+  type Completion = ReturnType<typeof completion>;
+
+  const handlers = new Map<string, Handler>();
+  const commands: string[] = [];
+  const notices: string[] = [];
+  const appended: Array<{ branch: string; type: string; data: unknown }> = [];
+  let branchName = "A";
+  let branch = [userEntry("a1", "Work on branch A")];
+  let completeCalls = 0;
+  let resolveFirst = (_response: Completion) => {};
+  const firstResponse = new Promise<Completion>((resolve) => {
+    resolveFirst = resolve;
+  });
+
+  const ctx = {
+    mode: "rpc",
+    hasUI: true,
+    model: { contextWindow: 100 },
+    sessionManager: { getBranch: () => branch },
+    modelRegistry: {
+      complete: async () => {
+        completeCalls++;
+        if (completeCalls === 1) return firstResponse;
+        if (completeCalls === 2) return completion("NEW\nBranch B");
+        return completion("", "error");
+      },
+    },
+    getContextUsage: () => ({ tokens: 10, percent: 10, contextWindow: 100 }),
+    ui: { notify: (message: string) => notices.push(message) },
+  } as unknown as ExtensionContext;
+  const pi = {
+    registerCommand: (name: string) => commands.push(name),
+    registerShortcut: () => {},
+    on: (event: string, handler: Handler) => handlers.set(event, handler),
+    appendEntry: (type: string, data: unknown) =>
+      appended.push({ branch: branchName, type, data }),
+  } as unknown as ExtensionAPI;
+
+  minimapExtension(pi);
+  assert.ok(commands.includes("minimap"));
+  const settle = handlers.get("agent_settled");
+  const switchTree = handlers.get("session_tree");
+  assert.ok(settle && switchTree);
+
+  const settlingA = Promise.resolve(settle({}, ctx));
+  assert.equal(completeCalls, 1);
+  branchName = "B";
+  branch = [userEntry("b1", "Work on branch B")];
+  const switching = Promise.resolve(switchTree({}, ctx));
+  resolveFirst(completion("NEW\nBranch A"));
+  await Promise.all([settlingA, switching]);
+
+  assert.equal(completeCalls, 2);
+  assert.ok(appended.every((entry) => entry.branch === "B"));
+  assert.equal(JSON.stringify(appended).includes("Branch A"), false);
+  assert.equal(JSON.stringify(appended).includes("Branch B"), true);
+
+  branch = [...branch, userEntry("b2", "Retry branch B", "b1")];
+  await settle({}, ctx);
+  assert.equal(completeCalls, 3);
+  assert.deepEqual(notices, [
+    "Minimap summary failed; it will retry after the next run",
+  ]);
+  assert.equal(
+    Object.hasOwn(appended.at(-1)?.data as object, "summaryError"),
+    false,
   );
 });

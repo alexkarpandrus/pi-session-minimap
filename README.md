@@ -1,15 +1,18 @@
 # pi-session-minimap
 
-A non-capturing side pane for [pi](https://pi.dev) that shows:
+A non-capturing side pane for [pi](https://pi.dev). It shows:
 
+- the current semantic goal and append-only goal history
 - input/output tokens, cost, and context-window usage
-- agent vs minimap-summary token spend
-- tool-call counts, skill invocation counts, reset totals, nested tool token usage, and categorized errors
-- append-only semantic steps that can span multiple user messages
-- context growth and reset events, invoked skills, and agent-chosen directions for each semantic step
-- an early readable label for current work
+- agent and minimap-summary token spend
+- tool calls, invoked skills, resets, nested tool tokens, and errors
+- context growth, compactions, and overflow
 
-Each settled run is compared with the open semantic step. Follow-ups, questions, retries, added requirements, and visual refinements extend that broad task thread; only an unrelated objective closes it and opens another. Completed steps are append-only, while the open step is checkpointed for resume. When later evidence proves a settled title wrong, the semantic model appends a correction that is overlaid at display time, preserving the original history. Older steps without saved context snapshots are displayed with context inferred from their final assistant response. Sessions that predate minimap history recover display-only steps from compaction boundaries without rewriting the session. Recovered steps are marked `≈`; every card renders context, resets, decisions, then skills in the same order.
+Related follow-ups, questions, retries, and refinements stay in one broad semantic step. Only an unrelated objective closes the step and opens another.
+
+Completed steps are append-only. The open step is checkpointed for resume. Later factual title corrections are stored as overlays, so the original history stays unchanged.
+
+Legacy sessions recover display-only steps from compaction boundaries. Recovered steps are marked `≈`. The dashboard condenses consequential decisions and skill invocation totals.
 
 ## Install
 
@@ -23,7 +26,16 @@ Or try the extension directly from this checkout:
 pi -e ./extensions/minimap.ts
 ```
 
-Use `/minimap` to hide or show the pane. The compact pane puts the current semantic goal first, followed by scoped settled totals, recent semantic history, context ranges, and reset counts. `↻` marks context compactions in both views; `▲` additionally marks overflow. Press `Ctrl+Shift+M` for a content-sized dashboard that prioritizes the current goal and five-column timeline, then shows one condensed session line, an attention banner for unresolved failure streaks, a failure postmortem grouped by run, tool, type, and repeated pattern, and recent consequential decisions. Scroll either view with `Ctrl+Shift+K` and `Ctrl+Shift+J`. The compact pane appears automatically in interactive mode when the terminal is at least 110 columns wide.
+## Use
+
+- Use `/minimap` to hide or show the pane.
+- Press `Ctrl+Shift+M` to switch between compact and expanded views.
+- Scroll with `Ctrl+Shift+K` and `Ctrl+Shift+J`.
+- `↻` marks compaction. `▲` marks overflow.
+
+The compact view shows the current goal first. Session totals and recent history follow it. The expanded dashboard adds the five-column timeline, nested tool tokens, skill totals, failure analysis, and up to three recent decisions.
+
+The compact pane opens automatically in interactive terminals that are at least 110 columns wide.
 
 ## Development
 
