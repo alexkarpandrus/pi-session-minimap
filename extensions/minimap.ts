@@ -554,10 +554,7 @@ const stripTerminalStrings = (text: string): string => {
     }
     index += code === 27 ? 2 : 1;
     while (index < text.length) {
-      if (
-        text.charCodeAt(index) === 7 ||
-        text.charCodeAt(index) === 156
-      ) {
+      if (text.charCodeAt(index) === 7 || text.charCodeAt(index) === 156) {
         index++;
         break;
       }
@@ -863,7 +860,11 @@ export const recoverHistoricalSteps = (
     const segment = entries.slice(segmentStart, index + 1);
     let userGoal = "";
     let fallbackUserGoal = "";
-    for (let segmentIndex = segment.length - 1; segmentIndex >= 0; segmentIndex--) {
+    for (
+      let segmentIndex = segment.length - 1;
+      segmentIndex >= 0;
+      segmentIndex--
+    ) {
       const entry = segment[segmentIndex];
       if (!entry || entry.type !== "message" || entry.message.role !== "user")
         continue;
@@ -882,7 +883,10 @@ export const recoverHistoricalSteps = (
       version: STEP_VERSION,
       throughEntryId: boundary.id,
       summary:
-        userGoal || summaryGoal || fallbackUserGoal || conciseStep(boundary.summary),
+        userGoal ||
+        summaryGoal ||
+        fallbackUserGoal ||
+        conciseStep(boundary.summary),
       recovered: true,
       tools: stats.tools,
       skills: stats.skills,
@@ -1246,10 +1250,7 @@ class MinimapPane implements Component {
     const pendingStats = collectStepStats(
       liveSummary ? entriesAfter(entries, previousThrough) : [],
     );
-    const liveTools = Object.assign(
-      emptyCounts(),
-      this.state.open?.tools,
-    );
+    const liveTools = Object.assign(emptyCounts(), this.state.open?.tools);
     for (const [name, count] of Object.entries(pendingStats.tools))
       liveTools[name] = (liveTools[name] ?? 0) + count;
     const liveUsage = { ...(this.state.open?.usage ?? emptyUsage()) };
@@ -1900,9 +1901,7 @@ export default function minimapExtension(pi: ExtensionAPI) {
     openPane(paneContext, hidden);
   };
 
-  const updateSemanticMap = async (
-    ctx: ExtensionContext,
-  ): Promise<boolean> => {
+  const updateSemanticMap = async (ctx: ExtensionContext): Promise<boolean> => {
     if (summaryRunning) {
       summaryPending = true;
       return false;

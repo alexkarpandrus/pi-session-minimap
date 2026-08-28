@@ -9,6 +9,14 @@
     "minimap"
   ],
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/alexkarpandrus/pi-session-minimap.git"
+  },
+  "homepage": "https://github.com/alexkarpandrus/pi-session-minimap#readme",
+  "bugs": {
+    "url": "https://github.com/alexkarpandrus/pi-session-minimap/issues"
+  },
   "files": [
     "extensions/minimap.ts"
   ],

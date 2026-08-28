@@ -123,7 +123,6 @@ test("entriesAfter keeps append-only step boundaries", () => {
   assert.equal(entriesAfter(entries, "missing").length, entries.length);
 });
 
-
 test("finalized steps close matching restored checkpoints", () => {
   const snapshot = { ...usage(0, 0), cost: 0 };
   const open = (summary: string, throughEntryId: string) => ({
@@ -336,10 +335,13 @@ test("invoked skills are attached to semantic steps", () => {
       },
     },
   ] as SessionEntry[];
-  assert.deepEqual({ ...extractSkills(skillEntries) }, {
-    "diagnosing-bugs": 1,
-    "session-closeout": 1,
-  });
+  assert.deepEqual(
+    { ...extractSkills(skillEntries) },
+    {
+      "diagnosing-bugs": 1,
+      "session-closeout": 1,
+    },
+  );
   const hostile = extractSkills([
     {
       type: "message",
@@ -746,7 +748,6 @@ test("context resets are derived from compaction entries", () => {
   ]);
 });
 
-
 test("current context only fills the latest unresolved compaction", () => {
   const compaction = (id: string, tokensBefore: number): SessionEntry =>
     ({
@@ -883,7 +884,6 @@ test("legacy sessions recover compaction-bounded steps", () => {
   );
 });
 
-
 test("legacy recovery replaces generic continuation prompts with compaction goals", () => {
   const recovered = recoverHistoricalSteps(
     [
@@ -899,7 +899,8 @@ test("legacy recovery replaces generic continuation prompts with compaction goal
         id: "compact",
         parentId: "continue",
         timestamp: "2026-01-01T00:00:01Z",
-        summary: "## Goal\nRecover receipts and retry completed attempts\n\n## Progress\nDone",
+        summary:
+          "## Goal\nRecover receipts and retry completed attempts\n\n## Progress\nDone",
         firstKeptEntryId: "continue",
         tokensBefore: 50,
       },
@@ -907,7 +908,10 @@ test("legacy recovery replaces generic continuation prompts with compaction goal
     100,
   );
 
-  assert.equal(recovered[0]?.summary, "Recover receipts and retry completed attempts");
+  assert.equal(
+    recovered[0]?.summary,
+    "Recover receipts and retry completed attempts",
+  );
 });
 
 test("step corrections preserve history while latest title wins", () => {
