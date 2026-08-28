@@ -4,19 +4,15 @@
 
 `pi-session-minimap` turns a long agent transcript into a live semantic map. It keeps the current goal, prior goals, context pressure, cost, tool activity, and failures visible without taking focus from the editor.
 
-```text
-╭──────────────────────────────────────────────────────────╮
-│ Session minimap                                          │
-│ ● Current · Prepare the first public release             │
-│ tok 128k→9k · $2.14 · ctx now61% ▓▓▓▓░░                 │
-│ work agent137k · minimap412 · calls84 · skills3 · err2   │
-├──────────────────────────────────────────────────────────┤
-│ 1. Build append-only semantic history                    │
-│    ctx 18→47%                                            │
-│ 2. Add context resets and failure analysis               │
-│    ctx start 47% · end 31% · ↻1                          │
-╰──────────────────────────────────────────────────────────╯
-```
+## Screenshots
+
+### Compact view
+
+![Compact pi session minimap showing the current goal, context history, session cost, and completed goals](https://raw.githubusercontent.com/alexkarpandrus/pi-session-minimap/main/assets/compact.png)
+
+### Expanded dashboard
+
+![Expanded pi session minimap showing semantic history, context resets, cost, tool activity, failure analysis, and decisions](https://raw.githubusercontent.com/alexkarpandrus/pi-session-minimap/main/assets/expanded.png)
 
 ## Why
 
