@@ -26,7 +26,8 @@
   "pi": {
     "extensions": [
       "./extensions/minimap.ts"
-    ]
+    ],
+    "image": "https://raw.githubusercontent.com/alexkarpandrus/pi-session-minimap/main/assets/compact.png"
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",

@@ -1085,7 +1085,7 @@ export const compactMetrics = (
   const contextMeter = `${"▓".repeat(filled)}${"░".repeat(6 - filled)}`;
   return [
     `tok ${fmt(stats.input)}→${fmt(stats.output)} · $${stats.cost.toFixed(2)} · ctx now${percent == null ? "?" : `${percent}%`} ${contextMeter}`,
-    `work agent${fmt(stats.agentTokens)} · minimap${fmt(stats.summaryTokens)} · calls${fmt(calls)} · skills${fmt(skills)} · err${stats.errors}${resetMetric}`,
+    `agent${fmt(stats.agentTokens)} · map${fmt(stats.summaryTokens)} · calls${fmt(calls)} · skills${fmt(skills)} · err${stats.errors}${resetMetric}`,
   ];
 };
 

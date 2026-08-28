@@ -736,27 +736,27 @@ test("dashboard graphics compress context without hiding resets", () => {
   );
 });
 
-test("compact metrics preserve live totals in two rows", () => {
-  assert.deepEqual(
-    compactMetrics(
-      {
-        input: 1_900_000,
-        output: 157_000,
-        cost: 44.025,
-        agentTokens: 55_500_000,
-        summaryTokens: 5_100,
-        tools: { read: 155, bash: 109 },
-        skills: { tdd: 2 },
-        errors: 13,
-      },
-      49,
-      3,
-    ),
-    [
-      "tok 1.9m→157k · $44.02 · ctx now49% ▓▓▓░░░",
-      "work agent55.5m · minimap5.1k · calls264 · skills2 · err13 · ↻3",
-    ],
+test("compact metrics fit the fixed-width pane", () => {
+  const metrics = compactMetrics(
+    {
+      input: 1_900_000,
+      output: 157_000,
+      cost: 44.025,
+      agentTokens: 55_500_000,
+      summaryTokens: 5_100,
+      tools: { read: 155, bash: 109 },
+      skills: { tdd: 2 },
+      errors: 13,
+    },
+    49,
+    3,
   );
+
+  assert.deepEqual(metrics, [
+    "tok 1.9m→157k · $44.02 · ctx now49% ▓▓▓░░░",
+    "agent55.5m · map5.1k · calls264 · skills2 · err13 · ↻3",
+  ]);
+  assert.ok(metrics.every((metric) => visibleWidth(metric) <= 58));
 });
 
 test("history scrolling starts at a complete step card", () => {
