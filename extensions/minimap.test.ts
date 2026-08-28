@@ -203,6 +203,21 @@ test("finalized steps close matching restored checkpoints", () => {
     "New goal",
   );
 
+  const legacyCompaction = {
+    type: "compaction",
+    id: "compact-after-failure",
+    parentId: "summary-failure",
+    timestamp: "2026-01-01T00:00:01Z",
+    summary: "## Goal\nLegacy goal",
+    firstKeptEntryId: "summary-failure",
+    tokensBefore: 80,
+  } as SessionEntry;
+  assert.equal(
+    restoreSavedState([summaryFailure, legacyCompaction], 100).steps[0]
+      ?.summary,
+    "Legacy goal",
+  );
+
   const checkpointBefore = custom(
     "checkpoint-before",
     "session-minimap-open-step",

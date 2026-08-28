@@ -264,9 +264,10 @@ export const restoreSavedState = (
         ),
       )
     : Number.MAX_SAFE_INTEGER;
-  const firstCheckpointIndex = branch.findIndex(
-    (entry) => entry.type === "custom" && entry.customType === STATE_ENTRY_TYPE,
-  );
+  const firstCheckpointIndex = branch.findIndex((entry) => {
+    const checkpoint = openStateFromEntry(entry);
+    return Boolean(checkpoint && !checkpoint.usageOnly);
+  });
   const recoveryBoundary = Math.min(
     firstPersistedIndex,
     firstCheckpointIndex < 0 ? Number.MAX_SAFE_INTEGER : firstCheckpointIndex,
