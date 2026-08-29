@@ -37,8 +37,7 @@ Both views show:
 - input/output tokens, cost, and context-window usage
 - agent and minimap-summary token spend
 - tool calls, compactions, overflow, and categorized errors
-- append-only semantic steps that span related follow-ups and retries
-- display-only recovery from compaction summaries for older sessions
+- semantic steps that can be renamed or merged as recent work develops
 
 ## Install
 
@@ -61,7 +60,7 @@ pi -e ./extensions/minimap.ts
 | Scroll up | `Ctrl+Shift+K` |
 | Scroll down | `Ctrl+Shift+J` |
 
-`↻` marks compaction. `▲` marks overflow. `≈` marks recovered legacy history.
+`↻` marks compaction. `▲` marks overflow.
 
 The compact pane opens automatically in interactive terminals that are at least 110 columns wide.
 
@@ -69,9 +68,9 @@ The compact pane opens automatically in interactive terminals that are at least 
 
 Related follow-ups, questions, retries, and refinements stay in one milestone. A new step starts when the deliverable or phase changes materially, even within the same project.
 
-Completed steps are append-only. The open step is checkpointed for resume and stays open until later activity starts a materially different step.
+After each settled run, the extension re-reviews the latest five completed steps, the open step, and the new activity. It can rename or merge adjacent steps while older history stays fixed. Revised step metrics are recomputed from their original session entries.
 
-The extension re-evaluates the map when each agent run fully settles. It uses the currently selected model to classify semantic boundaries, stores compact metadata in the pi session file, and never takes terminal focus.
+The extension uses the currently selected model, stores compact revision metadata in the pi session file, and never takes terminal focus.
 
 ## Development
 

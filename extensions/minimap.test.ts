@@ -25,22 +25,19 @@ import minimapExtension, {
   elapsedLabel,
   extractSkills,
   failureReview,
-  inferStepContexts,
   isStandaloneSkillInjection,
   isConsequentialDecision,
   minimapHeight,
   minimapOverlayOptions,
   minimapStatus,
   meterBar,
-  parseSemanticDecision,
+  parseTailPlan,
   readableGoal,
-  recoverHistoricalSteps,
   restoreSavedState,
   scrollWindow,
   sessionEfficiency,
   trailingFailureStreak,
   wrapStepSummary,
-  type MinimapStep,
 } from "./minimap.ts";
 
 const usage = (input: number, output: number) => ({
@@ -96,28 +93,12 @@ const entries = [
     id: "summary",
     parentId: "result",
     timestamp: "2026-01-01T00:00:03Z",
-    customType: "session-minimap-open-step",
+    customType: "session-minimap-state",
     data: {
       version: 1,
       callUsage: { ...usage(8, 4), cost: 0.003 },
       usageOnly: true,
     },
-  },
-  {
-    type: "custom",
-    id: "step",
-    parentId: "result",
-    timestamp: "2026-01-01T00:00:03Z",
-    customType: "session-minimap-step",
-    data: {
-      version: 1,
-      throughEntryId: "result",
-      summary: "Inspected the failure.",
-      tools: { read: 1 },
-      errors: 1,
-      usage: { ...usage(110, 22), cost: 0.02 },
-      createdAt: 4,
-    } satisfies MinimapStep,
   },
 ] as SessionEntry[];
 
@@ -134,155 +115,12 @@ test("collectStats separates agent and minimap usage", () => {
   assert.deepEqual({ ...stats.toolTokens }, { read: 12 });
 });
 
-test("entriesAfter keeps append-only step boundaries", () => {
+test("entriesAfter slices after a persisted boundary", () => {
   assert.deepEqual(
     entriesAfter(entries, "result").map((entry) => entry.id),
-    ["summary", "step"],
+    ["summary"],
   );
   assert.equal(entriesAfter(entries, "missing").length, entries.length);
-});
-
-test("finalized steps close matching restored checkpoints", () => {
-  const snapshot = { ...usage(0, 0), cost: 0 };
-  const open = (summary: string, throughEntryId: string) => ({
-    summary,
-    throughEntryId,
-    tools: {},
-    skills: {},
-    errors: 0,
-    usage: snapshot,
-    contextStart: { tokens: 10, percent: 10, contextWindow: 100 },
-    contextEnd: { tokens: 20, percent: 20, contextWindow: 100 },
-    createdAt: 1,
-  });
-  const custom = (
-    id: string,
-    customType: string,
-    data: unknown,
-  ): SessionEntry =>
-    ({
-      type: "custom",
-      id,
-      parentId: null,
-      timestamp: "2026-01-01T00:00:00Z",
-      customType,
-      data,
-    }) as SessionEntry;
-  const oldOpen = custom("open-old", "session-minimap-open-step", {
-    version: 1,
-    callUsage: snapshot,
-    open: open("Old goal", "result-old"),
-  });
-  const finalized = custom("step-old", "session-minimap-step", {
-    version: 1,
-    throughEntryId: "result-old",
-    summary: "Old goal",
-    tools: {},
-    errors: 0,
-    usage: snapshot,
-    createdAt: 1,
-  });
-  const newOpen = custom("open-new", "session-minimap-open-step", {
-    version: 1,
-    callUsage: snapshot,
-    open: open("New goal", "result-new"),
-  });
-  const summaryFailure = custom(
-    "summary-failure",
-    "session-minimap-open-step",
-    {
-      version: 1,
-      callUsage: { ...usage(3, 2), cost: 0 },
-      usageOnly: true,
-    },
-  );
-
-  assert.equal(restoreSavedState([oldOpen, finalized]).open, undefined);
-  assert.equal(
-    restoreSavedState([oldOpen, summaryFailure]).open?.summary,
-    "Old goal",
-  );
-  assert.equal(collectStats([summaryFailure]).summaryTokens, 5);
-  assert.equal(
-    restoreSavedState([oldOpen, finalized, newOpen]).open?.summary,
-    "New goal",
-  );
-
-  const legacyCompaction = {
-    type: "compaction",
-    id: "compact-after-failure",
-    parentId: "summary-failure",
-    timestamp: "2026-01-01T00:00:01Z",
-    summary: "## Goal\nLegacy goal",
-    firstKeptEntryId: "summary-failure",
-    tokensBefore: 80,
-  } as SessionEntry;
-  assert.equal(
-    restoreSavedState([summaryFailure, legacyCompaction], 100).steps[0]
-      ?.summary,
-    "Legacy goal",
-  );
-
-  const checkpointBefore = custom(
-    "checkpoint-before",
-    "session-minimap-open-step",
-    {
-      version: 1,
-      callUsage: snapshot,
-      open: open("Spanning goal", "result-before"),
-    },
-  );
-  const compaction = {
-    type: "compaction",
-    id: "compact-covered",
-    parentId: "checkpoint-before",
-    timestamp: "2026-01-01T00:00:01Z",
-    summary: "## Goal\nSpanning goal",
-    firstKeptEntryId: "result-covered",
-    tokensBefore: 80,
-  } as SessionEntry;
-  const resultCovered = {
-    type: "message",
-    id: "result-covered",
-    parentId: "compact-covered",
-    timestamp: "2026-01-01T00:00:02Z",
-    message: {
-      role: "assistant",
-      content: [],
-      api: "test",
-      provider: "test",
-      model: "test",
-      usage: usage(10, 2),
-      stopReason: "stop",
-      timestamp: 2,
-    },
-  } as SessionEntry;
-  const checkpointAfter = custom(
-    "checkpoint-after",
-    "session-minimap-open-step",
-    {
-      version: 1,
-      callUsage: snapshot,
-      open: open("Spanning goal", "result-covered"),
-    },
-  );
-  const coveredStep = custom("covered-step", "session-minimap-step", {
-    version: 1,
-    throughEntryId: "result-covered",
-    summary: "Spanning goal",
-    tools: {},
-    errors: 0,
-    usage: snapshot,
-    createdAt: 2,
-  });
-  const covered = restoreSavedState(
-    [checkpointBefore, compaction, resultCovered, checkpointAfter, coveredStep],
-    100,
-  );
-  assert.deepEqual(
-    covered.steps.map((step) => [step.summary, step.recovered]),
-    [["Spanning goal", undefined]],
-  );
 });
 
 test("malformed persisted minimap entries are ignored", () => {
@@ -296,19 +134,20 @@ test("malformed persisted minimap entries are ignored", () => {
       data,
     }) as SessionEntry;
   const branch = [
-    malformed("bad-step", "session-minimap-step", {
-      version: 1,
-      throughEntryId: "result",
-      summary: "Bad step",
-      tools: {},
-      errors: 0,
-      usage: "corrupt",
-      createdAt: 1,
-    }),
-    malformed("bad-open", "session-minimap-open-step", {
+    malformed("bad-open", "session-minimap-state", {
       version: 1,
       callUsage: "corrupt",
       open: "corrupt",
+    }),
+    malformed("bad-revision", "session-minimap-state", {
+      version: 1,
+      callUsage: { ...usage(0, 0), cost: 0 },
+      revision: { replaceCount: 1, steps: ["corrupt"] },
+    }),
+    malformed("impossible-revision", "session-minimap-state", {
+      version: 1,
+      callUsage: { ...usage(0, 0), cost: 0 },
+      revision: { replaceCount: 1, steps: [] },
     }),
   ];
 
@@ -342,50 +181,51 @@ test("step labels stay concise without rewriting stored summaries", () => {
   assert.equal(conciseStep("\u009d0;spoofed\u009cSafe title"), "Safe title");
 });
 
-test("semantic decisions can continue across user messages", () => {
+test("tail plans rename and merge adjacent semantic sources", () => {
   assert.deepEqual(
-    parseSemanticDecision("CONTINUE\nImproved minimap readability", true),
-    {
-      startsNewStep: false,
-      summary: "Improved minimap readability",
-      decisions: [],
-    },
-  );
-  assert.deepEqual(parseSemanticDecision("NEW\nAdded context history", true), {
-    startsNewStep: true,
-    summary: "Added context history",
-    decisions: [],
-  });
-  assert.deepEqual(parseSemanticDecision("Missing marker", true), {
-    startsNewStep: false,
-    summary: "",
-    decisions: [],
-  });
-  assert.deepEqual(
-    parseSemanticDecision(
-      "CONTINUE\nImproved minimap readability\nDECISION: Keep the pane non-capturing and use global scroll shortcuts",
-      true,
+    parseTailPlan(
+      [
+        "STEP S1+S2 | Unified authentication implementation",
+        "STEP CURRENT+NEW | Verified authentication behavior",
+        "DECISION: Keep the pane non-capturing and use global scroll shortcuts",
+      ].join("\n"),
+      ["S1", "S2", "CURRENT", "NEW"],
     ),
     {
-      startsNewStep: false,
-      summary: "Improved minimap readability",
+      groups: [
+        {
+          sources: ["S1", "S2"],
+          summary: "Unified authentication implementation",
+        },
+        {
+          sources: ["CURRENT", "NEW"],
+          summary: "Verified authentication behavior",
+        },
+      ],
       decisions: [
         "Keep the pane non-capturing and use global scroll shortcuts",
       ],
     },
   );
+
+  for (const malformed of [
+    "STEP S1 | Missing new activity",
+    "STEP NEW+S1 | Reordered sources",
+    "STEP S1+S1+NEW | Duplicated source",
+    "Unstructured response",
+  ])
+    assert.equal(parseTailPlan(malformed, ["S1", "NEW"]), undefined);
 });
 
 test("routine minimap mechanics are not recorded as decisions", () => {
-  const parsed = parseSemanticDecision(
+  const parsed = parseTailPlan(
     [
-      "CONTINUE",
-      "Improved minimap accuracy",
+      "STEP CURRENT+NEW | Improved minimap accuracy",
       "DECISION: Keep AgentsView excluded",
     ].join("\n"),
-    true,
+    ["CURRENT", "NEW"],
   );
-  assert.deepEqual(parsed.decisions, ["Keep AgentsView excluded"]);
+  assert.deepEqual(parsed?.decisions, ["Keep AgentsView excluded"]);
   assert.equal(isConsequentialDecision("Adjust layout labels"), false);
   assert.equal(
     isConsequentialDecision(
@@ -544,22 +384,30 @@ test("failure review supports session postmortems", () => {
   ]);
 });
 
-test("legacy steps get context ranges without rewriting entries", () => {
-  const step: MinimapStep = {
-    version: 1,
-    throughEntryId: "result",
-    summary: "Inspect failure",
-    tools: { read: 1 },
-    errors: 1,
-    usage: { ...usage(110, 22), cost: 0.02 },
-    createdAt: 4,
-  };
+test("failure labels strip terminal control strings", () => {
+  const toolName = "read\x1b]52;c;ZmFrZS1jbGlwYm9hcmQ=\x07";
+  const entries = [1, 2].map(
+    (id) =>
+      ({
+        type: "message",
+        id: String(id),
+        parentId: null,
+        timestamp: `2026-01-01T00:00:0${id}Z`,
+        message: {
+          role: "toolResult",
+          toolCallId: `call-${id}`,
+          toolName,
+          content: [],
+          isError: true,
+          timestamp: id,
+        },
+      }) as SessionEntry,
+  );
 
-  const [inferred] = inferStepContexts([step], entries, 1000);
-  assert.equal(inferred?.contextStart, undefined);
-  assert.equal(inferred?.contextEnd?.tokens, 120);
-  assert.equal(inferred?.contextEnd?.percent, 12);
-  assert.equal(step.contextEnd, undefined);
+  const review = failureReview(entries, { [toolName]: 2 });
+  assert.equal(categorizeError({ toolName, content: [] }), "read");
+  assert.equal(trailingFailureStreak(entries)?.source, "read");
+  assert.equal(review.patterns[0]?.label, "read: read failure");
 });
 
 test("standalone skill injections do not start semantic steps", () => {
@@ -757,6 +605,7 @@ test("compact metrics fit the fixed-width pane", () => {
       tools: { read: 155, bash: 109 },
       skills: { tdd: 2 },
       errors: 13,
+      errorKinds: { test: 8, typecheck: 5 },
     },
     49,
     3,
@@ -765,6 +614,7 @@ test("compact metrics fit the fixed-width pane", () => {
   assert.deepEqual(metrics, [
     "tok 1.9m→157k · $44.02 · ctx now49% ▓▓▓░░░",
     "agent55.5m · map5.1k · calls264 · skills2 · err13 · ↻3",
+    "errors test×8 typecheck×5",
   ]);
   assert.ok(metrics.every((metric) => visibleWidth(metric) <= 58));
 });
@@ -874,172 +724,159 @@ test("settled semantic threads are not shown as active work", () => {
   assert.equal(minimapStatus(false, false), "idle");
 });
 
-test("legacy sessions recover compaction-bounded steps", () => {
-  const legacyEntries = [
-    {
+test("tail reconciliation merges steps and recomputes their data", async () => {
+  type Handler = (event: unknown, ctx: ExtensionContext) => unknown;
+  const handlers = new Map<string, Handler>();
+  const user = (
+    id: string,
+    content: string,
+    parentId: string | null,
+  ): SessionEntry =>
+    ({
       type: "message",
-      id: "user-1",
-      parentId: null,
+      id,
+      parentId,
       timestamp: "2026-01-01T00:00:00Z",
-      message: { role: "user", content: "Build login flow", timestamp: 1 },
-    },
-    {
+      message: { role: "user", content, timestamp: 1 },
+    }) as SessionEntry;
+  const assistant = (
+    id: string,
+    parentId: string,
+    toolName: string,
+    input: number,
+    output: number,
+  ): SessionEntry =>
+    ({
       type: "message",
-      id: "assistant-1",
-      parentId: "user-1",
+      id,
+      parentId,
       timestamp: "2026-01-01T00:00:01Z",
       message: {
         role: "assistant",
-        content: [],
+        content: [
+          { type: "toolCall", id: `call-${id}`, name: toolName, arguments: {} },
+        ],
         api: "test",
         provider: "test",
         model: "test",
-        usage: usage(40, 10),
-        stopReason: "stop",
+        usage: usage(input, output),
+        stopReason: "toolUse",
         timestamp: 2,
       },
-    },
-    {
-      type: "compaction",
-      id: "compact-1",
-      parentId: "assistant-1",
-      timestamp: "2026-01-01T00:00:02Z",
-      summary: "Completed login flow",
-      firstKeptEntryId: "user-1",
-      tokensBefore: 50,
-    },
-    {
-      type: "message",
-      id: "user-2",
-      parentId: "compact-1",
-      timestamp: "2026-01-01T00:00:03Z",
-      message: { role: "user", content: "Tune caching policy", timestamp: 3 },
-    },
-    {
-      type: "message",
-      id: "assistant-2",
-      parentId: "user-2",
-      timestamp: "2026-01-01T00:00:04Z",
-      message: {
-        role: "assistant",
-        content: [],
+    }) as SessionEntry;
+
+  const plans = [
+    "STEP NEW | Investigated authentication behavior\nDECISION: Use native session storage",
+    "STEP CURRENT | Investigated authentication behavior\nSTEP NEW | Implemented authentication flow",
+    "STEP S1+CURRENT | Built authentication flow\nSTEP NEW | Verified authentication behavior",
+  ];
+  let contextTokens = 20;
+  let branch: SessionEntry[] = [
+    user("u1", "Investigate authentication", null),
+    assistant("a1", "u1", "read", 10, 2),
+  ];
+  let customId = 0;
+  const ctx = {
+    mode: "rpc",
+    hasUI: false,
+    model: { contextWindow: 100 },
+    sessionManager: { getBranch: () => branch },
+    modelRegistry: {
+      complete: async () => ({
+        role: "assistant" as const,
+        content: [{ type: "text" as const, text: plans.shift()! }],
         api: "test",
         provider: "test",
         model: "test",
-        usage: usage(25, 5),
-        stopReason: "stop",
-        timestamp: 4,
-      },
+        usage: usage(1, 1),
+        stopReason: "stop" as const,
+        timestamp: 1,
+      }),
     },
-    {
-      type: "compaction",
-      id: "compact-2",
-      parentId: "assistant-2",
-      timestamp: "2026-01-01T00:00:05Z",
-      summary: "Completed cache tuning",
-      firstKeptEntryId: "user-2",
-      tokensBefore: 30,
-    },
-  ] as SessionEntry[];
-
-  const recovered = recoverHistoricalSteps(legacyEntries, 100);
-  assert.deepEqual(
-    recovered.map((step) => ({
-      throughEntryId: step.throughEntryId,
-      summary: step.summary,
-      start: step.contextStart?.percent,
-      end: step.contextEnd?.percent,
-      recovered: step.recovered,
-    })),
-    [
-      {
-        throughEntryId: "compact-1",
-        summary: "Build login flow",
-        start: undefined,
-        end: 50,
-        recovered: true,
-      },
-      {
-        throughEntryId: "compact-2",
-        summary: "Tune caching policy",
-        start: 30,
-        end: 30,
-        recovered: true,
-      },
-    ],
-  );
-
-  const restored = restoreSavedState(
-    [
-      ...legacyEntries,
-      {
-        type: "message",
-        id: "assistant-3",
-        parentId: "compact-2",
-        timestamp: "2026-01-01T00:00:06Z",
-        message: {
-          role: "assistant",
-          content: [],
-          api: "test",
-          provider: "test",
-          model: "test",
-          usage: usage(10, 2),
-          stopReason: "stop",
-          timestamp: 6,
-        },
-      },
-      {
+    getContextUsage: () => ({
+      tokens: contextTokens,
+      percent: contextTokens,
+      contextWindow: 100,
+    }),
+    ui: { notify: () => {} },
+  } as unknown as ExtensionContext;
+  const pi = {
+    registerCommand: () => {},
+    registerShortcut: () => {},
+    on: (event: string, handler: Handler) => handlers.set(event, handler),
+    appendEntry: (customType: string, data: unknown) => {
+      branch.push({
         type: "custom",
-        id: "step-3",
-        parentId: "assistant-3",
-        timestamp: "2026-01-01T00:00:07Z",
-        customType: "session-minimap-step",
-        data: {
-          version: 1,
-          throughEntryId: "assistant-3",
-          summary: "Ship the minimap",
-          tools: {},
-          errors: 0,
-          usage: { ...usage(10, 2), cost: 0.01 },
-          createdAt: 7,
-        } satisfies MinimapStep,
-      },
-    ] as SessionEntry[],
-    100,
+        id: `map-${++customId}`,
+        parentId: branch.at(-1)?.id ?? null,
+        timestamp: "2026-01-01T00:00:02Z",
+        customType,
+        data,
+      } as SessionEntry);
+    },
+  } as unknown as ExtensionAPI;
+
+  minimapExtension(pi);
+  const settle = handlers.get("agent_settled");
+  assert.ok(settle);
+  await settle({}, ctx);
+
+  contextTokens = 40;
+  branch.push(
+    user("u2", "Implement authentication", branch.at(-1)?.id ?? null),
+    assistant("a2", "u2", "edit", 20, 3),
   );
+  await settle({}, ctx);
+
+  contextTokens = 60;
+  branch.push(
+    user("u3", "Verify authentication", branch.at(-1)?.id ?? null),
+    assistant("a3", "u3", "test", 30, 4),
+    {
+      type: "message",
+      id: "r3",
+      parentId: "a3",
+      timestamp: "2026-01-01T00:00:02Z",
+      message: {
+        role: "toolResult",
+        toolCallId: "call-a3",
+        toolName: "test",
+        content: [{ type: "text", text: "failed" }],
+        usage: usage(5, 1),
+        isError: true,
+        timestamp: 3,
+      },
+    } as SessionEntry,
+  );
+  await settle({}, ctx);
+
+  const restored = restoreSavedState(branch);
   assert.deepEqual(
     restored.steps.map((step) => step.summary),
-    ["Build login flow", "Tune caching policy", "Ship the minimap"],
+    ["Built authentication flow"],
   );
-});
-
-test("legacy recovery replaces generic continuation prompts with compaction goals", () => {
-  const recovered = recoverHistoricalSteps(
+  assert.equal(restored.open?.summary, "Verified authentication behavior");
+  assert.deepEqual({ ...restored.steps[0]?.tools }, { read: 1, edit: 1 });
+  assert.deepEqual(restored.steps[0]?.usage, {
+    ...usage(30, 5),
+    cost: 0.02,
+  });
+  assert.deepEqual(restored.steps[0]?.decisions, [
+    "Use native session storage",
+  ]);
+  assert.deepEqual({ ...restored.open?.tools }, { test: 1 });
+  assert.equal(restored.open?.errors, 1);
+  assert.deepEqual(restored.open?.usage, { ...usage(35, 5), cost: 0.02 });
+  assert.deepEqual(
     [
-      {
-        type: "message",
-        id: "continue",
-        parentId: null,
-        timestamp: "2026-01-01T00:00:00Z",
-        message: { role: "user", content: "continue", timestamp: 1 },
-      },
-      {
-        type: "compaction",
-        id: "compact",
-        parentId: "continue",
-        timestamp: "2026-01-01T00:00:01Z",
-        summary:
-          "## Goal\nRecover receipts and retry completed attempts\n\n## Progress\nDone",
-        firstKeptEntryId: "continue",
-        tokensBefore: 50,
-      },
-    ] as SessionEntry[],
-    100,
+      restored.steps[0]?.contextStart?.tokens,
+      restored.steps[0]?.contextEnd?.tokens,
+    ],
+    [20, 40],
   );
-
-  assert.equal(
-    recovered[0]?.summary,
-    "Recover receipts and retry completed attempts",
+  assert.deepEqual(
+    [restored.open?.contextStart.tokens, restored.open?.contextEnd.tokens],
+    [40, 60],
   );
 });
 
@@ -1083,6 +920,10 @@ test("lifecycle reconciles on settlement and recovers update failures", async ()
   const firstResponse = new Promise<Completion>((resolve) => {
     resolveFirst = resolve;
   });
+  let resolveShutdown = (_response: Completion) => {};
+  const shutdownResponse = new Promise<Completion>((resolve) => {
+    resolveShutdown = resolve;
+  });
 
   const ctx = {
     mode: "rpc",
@@ -1094,9 +935,10 @@ test("lifecycle reconciles on settlement and recovers update failures", async ()
         completionOptions.push(args[2]);
         completeCalls++;
         if (completeCalls === 1) return firstResponse;
-        if (completeCalls === 2) return completion("NEW\nBranch B");
+        if (completeCalls === 2) return completion("STEP NEW | Branch B");
         if (completeCalls === 3) return completion("", "error");
-        return completion("CONTINUE\nBranch B recovered");
+        if (completeCalls === 6) return shutdownResponse;
+        return completion("STEP CURRENT+NEW | Branch B recovered");
       },
     },
     getContextUsage: () => ({ tokens: 10, percent: 10, contextWindow: 100 }),
@@ -1112,6 +954,14 @@ test("lifecycle reconciles on settlement and recovers update failures", async ()
         throw new Error("persistence failed");
       }
       appended.push({ branch: branchName, type, data });
+      branch.push({
+        type: "custom",
+        id: `map-${appended.length}`,
+        parentId: branch.at(-1)?.id ?? null,
+        timestamp: "2026-01-01T00:00:00Z",
+        customType: type,
+        data,
+      } as SessionEntry);
     },
   } as unknown as ExtensionAPI;
 
@@ -1128,15 +978,26 @@ test("lifecycle reconciles on settlement and recovers update failures", async ()
   branchName = "B";
   branch = [userEntry("b1", "Work on branch B")];
   const switching = Promise.resolve(switchTree({}, ctx));
-  resolveFirst(completion("NEW\nBranch A"));
+  resolveFirst(completion("STEP NEW | Branch A"));
   await Promise.all([settlingA, switching]);
 
   assert.equal(completeCalls, 2);
-  assert.deepEqual(completionOptions.at(-1), {
+  const { signal, ...options } = completionOptions.at(-1) as {
+    signal: AbortSignal;
+    cacheRetention: string;
+    maxTokens: number;
+    timeoutMs: number;
+  };
+  assert.equal(signal.aborted, false);
+  assert.deepEqual(options, {
     cacheRetention: "none",
     maxTokens: 256,
     timeoutMs: 60_000,
   });
+  assert.equal(
+    (completionOptions[0] as { signal: AbortSignal }).signal.aborted,
+    true,
+  );
   assert.ok(appended.every((entry) => entry.branch === "B"));
   assert.equal(JSON.stringify(appended).includes("Branch A"), false);
   assert.equal(JSON.stringify(appended).includes("Branch B"), true);
@@ -1168,8 +1029,18 @@ test("lifecycle reconciles on settlement and recovers update failures", async ()
     Object.hasOwn(appended.at(-1)?.data as object, "summaryError"),
     false,
   );
+  branch = [...branch, userEntry("b4", "Cancel branch B", "b3")];
+  const settlingShutdown = Promise.resolve(settle({}, ctx));
+  await Promise.resolve();
+  assert.equal(completeCalls, 6);
   const beforeShutdown = appended.length;
   shutdown({ reason: "quit" }, ctx);
+  assert.equal(
+    (completionOptions.at(-1) as { signal: AbortSignal }).signal.aborted,
+    true,
+  );
+  resolveShutdown(completion("STEP CURRENT+NEW | Should not persist"));
+  await settlingShutdown;
   assert.equal(appended.length, beforeShutdown);
 });
 
