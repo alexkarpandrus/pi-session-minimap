@@ -8,6 +8,7 @@ import type {
   ExtensionAPI,
   ExtensionContext,
   SessionEntry,
+  SessionManager,
   Theme,
 } from "@earendil-works/pi-coding-agent";
 import {
@@ -23,13 +24,15 @@ import {
 const STATE_ENTRY_TYPE = "session-minimap-state";
 const STEP_VERSION = 1;
 const SUMMARY_TIMEOUT_MS = 60_000;
+const MAX_PENDING_SOURCES = 8;
+const MAX_TRANSCRIPT_CHARS = 18_000;
 const SUMMARY_SYSTEM_PROMPT = `Maintain a canonical semantic minimap of an AI coding session.
 A step is one meaningful milestone. Related retries, corrections, questions, and refinements belong together.
-You receive ordered sources: up to five settled steps named S1...S5, an optional CURRENT open step, and NEW activity.
+You receive ordered sources: up to five settled steps named S1...S5, an optional CURRENT open step, and one or more new activity sources named NEW or N1...Nn.
 Re-review the full supplied tail. Rename steps when their accepted outcome changed. Merge adjacent sources when they describe one milestone. Keep distinct deliverables or phases separate.
 Reply with one or more lines in this exact form:
 STEP S1+S2 | A title-like 6-10 word summary
-STEP CURRENT+NEW | Another title-like 6-10 word summary
+STEP CURRENT+N1 | Another title-like 6-10 word summary
 Then zero to two lines formatted as DECISION: <agent-chosen direction>.
 Use every supplied source exactly once and in order. Do not reorder, omit, duplicate, or split a source. Only merge adjacent sources. The last STEP remains active; earlier STEP lines are settled.
 Decisions apply to the last STEP. They are consequential agent-chosen directions or trade-offs, not user requests, tool calls, routine implementation actions, wording, layout, tests, refactors, or deferred work.
@@ -71,18 +74,7 @@ export interface MinimapStep {
   createdAt: number;
 }
 
-interface OpenStep {
-  summary: string;
-  throughEntryId: string;
-  tools: Record<string, number>;
-  skills: Record<string, number>;
-  decisions: string[];
-  errors: number;
-  usage: UsageSnapshot;
-  contextStart: ContextSnapshot;
-  contextEnd: ContextSnapshot;
-  createdAt: number;
-}
+type OpenStep = Omit<MinimapStep, "version">;
 
 interface StepRevision {
   replaceCount: number;
@@ -99,13 +91,10 @@ interface TailPlan {
   decisions: string[];
 }
 
-interface TailSource {
-  throughEntryId: string;
-  decisions: string[];
-  contextStart: ContextSnapshot;
-  contextEnd: ContextSnapshot;
-  createdAt: number;
-}
+type TailSource = Pick<
+  OpenStep,
+  "throughEntryId" | "decisions" | "contextStart" | "contextEnd" | "createdAt"
+>;
 
 interface MinimapStateData {
   version: 1;
@@ -418,12 +407,7 @@ const reconcileTail = (
   sources: TailSource[],
   plan: TailPlan,
 ): { completed: MinimapStep[]; open: OpenStep } => {
-  type ReconciledStep = MinimapStep & {
-    skills: Record<string, number>;
-    contextStart: ContextSnapshot;
-    contextEnd: ContextSnapshot;
-  };
-  const reconciled: ReconciledStep[] = [];
+  const reconciled: MinimapStep[] = [];
   let sourceIndex = 0;
   let previousBoundary = boundary;
   for (const [groupIndex, group] of plan.groups.entries()) {
@@ -468,21 +452,8 @@ const reconcileTail = (
 
   const active = reconciled.pop();
   if (!active) throw new Error("minimap tail plan is empty");
-  return {
-    completed: reconciled,
-    open: {
-      summary: active.summary,
-      throughEntryId: active.throughEntryId,
-      tools: active.tools,
-      skills: active.skills,
-      decisions: active.decisions,
-      errors: active.errors,
-      usage: active.usage,
-      contextStart: active.contextStart,
-      contextEnd: active.contextEnd,
-      createdAt: active.createdAt,
-    },
-  };
+  const { version: _version, ...open } = active;
+  return { completed: reconciled, open };
 };
 
 const textContent = (content: unknown): string => {
@@ -531,7 +502,24 @@ export const extractSkills = (
 export const isStandaloneSkillInjection = (text: string): boolean =>
   /^<skill\s+name=["'][^"']+["'][^>]*>[\s\S]*<\/skill>$/.test(text.trim());
 
-const buildTranscript = (entries: SessionEntry[]): string => {
+
+const splitPendingActivity = (entries: SessionEntry[]): SessionEntry[][] => {
+  const starts = entries.flatMap((entry, index) =>
+    entry.type === "message" &&
+    entry.message.role === "user" &&
+    !isStandaloneSkillInjection(textContent(entry.message.content))
+      ? [index]
+      : [],
+  );
+  return starts.map((start, index) =>
+    entries.slice(
+      index === 0 ? 0 : start,
+      starts[index + 1] ?? entries.length,
+    ),
+  );
+};
+
+const buildTranscript = (entries: SessionEntry[], maxChars: number): string => {
   const lines: string[] = [];
   for (const entry of entries) {
     if (entry.type === "compaction") {
@@ -576,9 +564,11 @@ const buildTranscript = (entries: SessionEntry[]): string => {
   }
 
   const transcript = lines.join("\n\n");
-  return transcript.length <= 18_000
-    ? transcript
-    : `${transcript.slice(0, 6_000)}\n\n[… middle omitted …]\n\n${transcript.slice(-12_000)}`;
+  if (transcript.length <= maxChars) return transcript;
+  const omission = "\n\n[… middle omitted …]\n\n";
+  const available = maxChars - omission.length;
+  const head = Math.floor(available / 3);
+  return `${transcript.slice(0, head)}${omission}${transcript.slice(-(available - head))}`;
 };
 
 const stripTerminalStrings = (text: string): string => {
@@ -821,6 +811,18 @@ export const minimapOverlayOptions = (expanded: boolean): OverlayOptions => ({
   visible: (terminalWidth) => terminalWidth >= (expanded ? 80 : 110),
 });
 
+
+const parseTailGroup = (line: string): TailGroup | undefined => {
+  const match = /^STEP\s+([^|]+)\|\s*(.+)$/i.exec(line);
+  if (!match) return undefined;
+  const sources = (match[1] ?? "")
+    .split("+")
+    .map((source) => source.trim().toUpperCase())
+    .filter(Boolean);
+  const summary = conciseStep(match[2] ?? "");
+  return sources.length && summary ? { sources, summary } : undefined;
+};
+
 export const parseTailPlan = (
   text: string,
   sourceIds: string[],
@@ -830,24 +832,27 @@ export const parseTailPlan = (
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter(Boolean);
-  const decisions = lines
-    .filter((line) => line.startsWith("DECISION:"))
-    .map((line) => conciseStep(line.slice("DECISION:".length), 14))
-    .filter(isConsequentialDecision);
+  const decisionStart = lines.findIndex((line) => line.startsWith("DECISION:"));
+  const stepLines = decisionStart < 0 ? lines : lines.slice(0, decisionStart);
+  const decisionLines = decisionStart < 0 ? [] : lines.slice(decisionStart);
+  if (
+    !stepLines.length ||
+    decisionLines.length > 2 ||
+    decisionLines.some((line) => !line.startsWith("DECISION:"))
+  )
+    return undefined;
+
+  const parsedDecisions = decisionLines.map((line) =>
+    conciseStep(line.slice("DECISION:".length), 14),
+  );
+  if (parsedDecisions.some((decision) => !decision)) return undefined;
+  const decisions = parsedDecisions.filter(isConsequentialDecision);
   const groups: TailGroup[] = [];
-  for (const line of lines) {
-    if (line.startsWith("DECISION:")) continue;
-    const match = /^STEP\s+([^|]+)\|\s*(.+)$/i.exec(line);
-    if (!match) return undefined;
-    const sources = (match[1] ?? "")
-      .split("+")
-      .map((source) => source.trim().toUpperCase())
-      .filter(Boolean);
-    const summary = conciseStep(match[2] ?? "");
-    if (!sources.length || !summary) return undefined;
-    groups.push({ sources, summary });
+  for (const line of stepLines) {
+    const group = parseTailGroup(line);
+    if (!group) return undefined;
+    groups.push(group);
   }
-  if (!groups.length) return undefined;
   const flattened = groups.flatMap((group) => group.sources);
   if (
     flattened.length !== sourceIds.length ||
@@ -1734,14 +1739,35 @@ export default function minimapExtension(pi: ExtensionAPI) {
     state.open = restored.open;
   };
 
-  const appendState = (callUsage: UsageSnapshot, revision: StepRevision) => {
-    const data: MinimapStateData = {
+  const appendPersistedState = (
+    ctx: ExtensionContext,
+    data: MinimapStateData,
+  ) => {
+    // pi mutates the SessionManager leaf before a failed disk write returns.
+    const sessionManager = ctx.sessionManager as SessionManager;
+    const previousLeaf = ctx.sessionManager.getBranch().at(-1)?.id;
+    try {
+      pi.appendEntry(STATE_ENTRY_TYPE, data);
+    } catch (error) {
+      if (ctx.sessionManager.getBranch().at(-1)?.id !== previousLeaf) {
+        if (previousLeaf) sessionManager.branch(previousLeaf);
+        else sessionManager.resetLeaf();
+      }
+      throw error;
+    }
+  };
+
+  const appendState = (
+    ctx: ExtensionContext,
+    callUsage: UsageSnapshot,
+    revision: StepRevision,
+  ) => {
+    appendPersistedState(ctx, {
       version: STEP_VERSION,
       open: state.open,
       revision,
       callUsage,
-    };
-    pi.appendEntry(STATE_ENTRY_TYPE, data);
+    });
   };
 
   const openPane = (ctx: ExtensionContext, hidden = false) => {
@@ -1802,22 +1828,17 @@ export default function minimapExtension(pi: ExtensionAPI) {
     const previousThrough =
       openAtStart?.throughEntryId ?? state.steps.at(-1)?.throughEntryId;
     const pending = entriesAfter(branch, previousThrough);
-    if (
-      !pending.some(
-        (entry) =>
-          entry.type === "message" &&
-          entry.message.role === "user" &&
-          !isStandaloneSkillInjection(textContent(entry.message.content)),
-      )
-    )
-      return true;
-    const throughEntryId = branch.at(-1)?.id;
-    if (!throughEntryId) return true;
-
+    const pendingSegments = splitPendingActivity(pending);
+    if (!pendingSegments.length) return true;
+    const newSegments = pendingSegments.slice(0, MAX_PENDING_SOURCES);
+    const hasMoreNewSegments = pendingSegments.length > newSegments.length;
+    const newSourceIds = newSegments.map((_segment, index) =>
+      newSegments.length === 1 ? "NEW" : `N${index + 1}`,
+    );
     const sourceIds = [
       ...recentSteps.map((_step, index) => `S${index + 1}`),
       ...(openAtStart ? ["CURRENT"] : []),
-      "NEW",
+      ...newSourceIds,
     ];
     summaryRunning = true;
     const previousCurrent = state.current;
@@ -1840,13 +1861,19 @@ export default function minimapExtension(pi: ExtensionAPI) {
         "ORDERED SOURCES:",
         ...recentSteps.map((step, index) => `S${index + 1}: ${step.summary}`),
         ...(openAtStart ? [`CURRENT: ${openAtStart.summary}`] : []),
-        "NEW: activity below",
+        ...newSourceIds.map((sourceId) => `${sourceId}: activity below`),
         "",
         "CURRENT DECISIONS:",
         ...(openAtStart?.decisions ?? []).map((item) => `- ${item}`),
         "",
         "NEW ACTIVITY:",
-        buildTranscript(pending),
+        ...newSegments.flatMap((segment, index) => [
+          `${newSourceIds[index]}:`,
+          buildTranscript(
+            segment,
+            Math.floor(MAX_TRANSCRIPT_CHARS / newSegments.length),
+          ),
+        ]),
       ].join("\n");
       const response = await ctx.modelRegistry.complete(
         ctx.model,
@@ -1862,7 +1889,7 @@ export default function minimapExtension(pi: ExtensionAPI) {
         },
         {
           cacheRetention: "none",
-          maxTokens: 256,
+          maxTokens: Math.min(2_048, Math.max(256, sourceIds.length * 24)),
           timeoutMs: SUMMARY_TIMEOUT_MS,
           signal: controller.signal,
         },
@@ -1884,7 +1911,7 @@ export default function minimapExtension(pi: ExtensionAPI) {
       return false;
     }
     if (!plan) {
-      pi.appendEntry(STATE_ENTRY_TYPE, {
+      appendPersistedState(ctx, {
         version: STEP_VERSION,
         callUsage,
         usageOnly: true,
@@ -1901,6 +1928,11 @@ export default function minimapExtension(pi: ExtensionAPI) {
     }
 
     const now = snapshotContext(ctx);
+    const unknownContext: ContextSnapshot = {
+      tokens: null,
+      percent: null,
+      contextWindow: now.contextWindow,
+    };
     const runStart =
       runContextStart ??
       openAtStart?.contextEnd ??
@@ -1908,31 +1940,28 @@ export default function minimapExtension(pi: ExtensionAPI) {
       now;
     const createdAt = Date.now();
     const sources: TailSource[] = [
-      ...recentSteps.map((step) => ({
-        throughEntryId: step.throughEntryId,
-        decisions: step.decisions,
-        contextStart: step.contextStart ?? step.contextEnd ?? runStart,
-        contextEnd: step.contextEnd ?? step.contextStart ?? runStart,
-        createdAt: step.createdAt,
-      })),
-      ...(openAtStart
-        ? [
-            {
-              throughEntryId: openAtStart.throughEntryId,
-              decisions: openAtStart.decisions,
-              contextStart: openAtStart.contextStart,
-              contextEnd: openAtStart.contextEnd,
-              createdAt: openAtStart.createdAt,
-            },
-          ]
-        : []),
-      {
-        throughEntryId,
-        decisions: [],
-        contextStart: runStart,
-        contextEnd: now,
-        createdAt,
-      },
+      ...recentSteps,
+      ...(openAtStart ? [openAtStart] : []),
+      ...newSegments.map((segment, index) => {
+        const last = segment.filter((entry) => !stateFromEntry(entry)).at(-1);
+        if (!last) throw new Error("minimap new activity source is empty");
+        const sourceCreatedAt = Date.parse(
+          segment.find(
+            (entry) =>
+              entry.type === "message" && entry.message.role === "user",
+          )?.timestamp ?? "",
+        );
+        const isLast = index === newSegments.length - 1;
+        return {
+          throughEntryId: last.id,
+          decisions: [],
+          contextStart: isLast ? runStart : unknownContext,
+          contextEnd: isLast ? now : unknownContext,
+          createdAt: Number.isFinite(sourceCreatedAt)
+            ? sourceCreatedAt
+            : createdAt,
+        };
+      }),
     ];
     const boundary =
       settledPrefixCount > 0
@@ -1941,11 +1970,12 @@ export default function minimapExtension(pi: ExtensionAPI) {
     const { completed, open } = reconcileTail(branch, boundary, sources, plan);
     state.steps.splice(settledPrefixCount, recentSteps.length, ...completed);
     state.open = open;
-    appendState(callUsage, {
+    appendState(ctx, callUsage, {
       replaceCount: recentSteps.length,
       steps: completed,
     });
     state.current = undefined;
+    if (hasMoreNewSegments) summaryPending = true;
     runContextStart = undefined;
     summaryRunning = false;
     requestRender();

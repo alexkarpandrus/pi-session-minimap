@@ -212,6 +212,9 @@ test("tail plans rename and merge adjacent semantic sources", () => {
     "STEP S1 | Missing new activity",
     "STEP NEW+S1 | Reordered sources",
     "STEP S1+S1+NEW | Duplicated source",
+    "DECISION: Interleaved decision\nSTEP S1+NEW | Invalid order",
+    "STEP S1+NEW | Too many decisions\nDECISION: First direction\nDECISION: Second direction\nDECISION: Third direction",
+    "STEP S1+NEW | Empty decision\nDECISION:",
     "Unstructured response",
   ])
     assert.equal(parseTailPlan(malformed, ["S1", "NEW"]), undefined);
@@ -856,6 +859,7 @@ test("tail reconciliation merges steps and recomputes their data", async () => {
     ["Built authentication flow"],
   );
   assert.equal(restored.open?.summary, "Verified authentication behavior");
+  assert.equal(Object.hasOwn(restored.open ?? {}, "version"), false);
   assert.deepEqual({ ...restored.steps[0]?.tools }, { read: 1, edit: 1 });
   assert.deepEqual(restored.steps[0]?.usage, {
     ...usage(30, 5),
@@ -878,6 +882,116 @@ test("tail reconciliation merges steps and recomputes their data", async () => {
     [restored.open?.contextStart.tokens, restored.open?.contextEnd.tokens],
     [40, 60],
   );
+});
+test("fresh history is reconstructed into ordered semantic steps", async () => {
+  type Handler = (event: unknown, ctx: ExtensionContext) => unknown;
+  const handlers = new Map<string, Handler>();
+  const user = (id: string, content: string, parentId: string | null) =>
+    ({
+      type: "message",
+      id,
+      parentId,
+      timestamp: `2026-01-01T00:00:${id.slice(1).padStart(2, "0")}Z`,
+      message: { role: "user", content, timestamp: 1 },
+    }) as SessionEntry;
+  const branch = Array.from({ length: 10 }, (_value, index) => {
+    const number = index + 1;
+    return user(
+      `u${number}`,
+      `Goal ${number} ${"x".repeat(5_000)}`,
+      index ? `u${index}` : null,
+    );
+  });
+  const prompts: string[] = [];
+  let completeCalls = 0;
+  let customId = 0;
+  const ctx = {
+    mode: "rpc",
+    hasUI: false,
+    model: { contextWindow: 100 },
+    sessionManager: {
+      getBranch: () => branch,
+      branch: () => {},
+      resetLeaf: () => {},
+    },
+    modelRegistry: {
+      complete: async (
+        _model: unknown,
+        request: { messages: Array<{ content: Array<{ text: string }> }> },
+      ) => {
+        const prompt = request.messages[0]?.content[0]?.text ?? "";
+        prompts.push(prompt);
+        completeCalls++;
+        const text =
+          completeCalls === 1
+            ? Array.from(
+                { length: 8 },
+                (_value, index) =>
+                  `STEP N${index + 1} | Completed semantic goal ${index + 1}`,
+              ).join("\n")
+            : [
+                "STEP S1 | Completed semantic goal 3",
+                "STEP S2 | Completed semantic goal 4",
+                "STEP S3 | Completed semantic goal 5",
+                "STEP S4 | Completed semantic goal 6",
+                "STEP S5 | Completed semantic goal 7",
+                "STEP CURRENT | Completed semantic goal 8",
+                "STEP N1 | Completed semantic goal 9",
+                "STEP N2 | Completed semantic goal 10",
+              ].join("\n");
+        return {
+          role: "assistant" as const,
+          content: [{ type: "text" as const, text }],
+          api: "test",
+          provider: "test",
+          model: "test",
+          usage: usage(1, 1),
+          stopReason: "stop" as const,
+          timestamp: 1,
+        };
+      },
+    },
+    getContextUsage: () => ({ tokens: 30, percent: 30, contextWindow: 100 }),
+    ui: { notify: () => {} },
+  } as unknown as ExtensionContext;
+  const pi = {
+    registerCommand: () => {},
+    registerShortcut: () => {},
+    on: (event: string, handler: Handler) => handlers.set(event, handler),
+    appendEntry: (customType: string, data: unknown) => {
+      branch.push({
+        type: "custom",
+        id: `map-${++customId}`,
+        parentId: branch.at(-1)?.id ?? null,
+        timestamp: "2026-01-01T00:00:04Z",
+        customType,
+        data,
+      } as SessionEntry);
+    },
+  } as unknown as ExtensionAPI;
+
+  minimapExtension(pi);
+  await handlers.get("session_start")?.({}, ctx);
+
+  assert.equal(completeCalls, 2);
+  assert.ok(prompts.every((prompt) => prompt.length < 20_000));
+  assert.match(prompts[0] ?? "", /N8:\s+activity below/);
+  assert.doesNotMatch(prompts[0] ?? "", /N9:\s+activity below/);
+  assert.match(prompts[1] ?? "", /N2:\s+activity below/);
+  const restored = restoreSavedState(branch);
+  assert.deepEqual(
+    restored.steps.map((step) => step.summary),
+    Array.from(
+      { length: 9 },
+      (_value, index) => `Completed semantic goal ${index + 1}`,
+    ),
+  );
+  assert.equal(restored.open?.summary, "Completed semantic goal 10");
+  assert.deepEqual(
+    restored.steps.map((step) => step.throughEntryId),
+    Array.from({ length: 9 }, (_value, index) => `u${index + 1}`),
+  );
+  assert.equal(restored.open?.throughEntryId, "u10");
 });
 
 test("lifecycle reconciles on settlement and recovers update failures", async () => {
@@ -916,6 +1030,7 @@ test("lifecycle reconciles on settlement and recovers update failures", async ()
   let completeCalls = 0;
   const completionOptions: unknown[] = [];
   let failAppend = false;
+  const rollbackIds: string[] = [];
   let resolveFirst = (_response: Completion) => {};
   const firstResponse = new Promise<Completion>((resolve) => {
     resolveFirst = resolve;
@@ -929,7 +1044,19 @@ test("lifecycle reconciles on settlement and recovers update failures", async ()
     mode: "rpc",
     hasUI: true,
     model: { contextWindow: 100 },
-    sessionManager: { getBranch: () => branch },
+    sessionManager: {
+      getBranch: () => branch,
+      branch: (entryId: string) => {
+        rollbackIds.push(entryId);
+        branch = branch.slice(
+          0,
+          branch.findIndex((entry) => entry.id === entryId) + 1,
+        );
+      },
+      resetLeaf: () => {
+        branch = [];
+      },
+    },
     modelRegistry: {
       complete: async (...args: unknown[]) => {
         completionOptions.push(args[2]);
@@ -938,7 +1065,7 @@ test("lifecycle reconciles on settlement and recovers update failures", async ()
         if (completeCalls === 2) return completion("STEP NEW | Branch B");
         if (completeCalls === 3) return completion("", "error");
         if (completeCalls === 6) return shutdownResponse;
-        return completion("STEP CURRENT+NEW | Branch B recovered");
+        return completion("STEP CURRENT+N1+N2 | Branch B recovered");
       },
     },
     getContextUsage: () => ({ tokens: 10, percent: 10, contextWindow: 100 }),
@@ -949,19 +1076,20 @@ test("lifecycle reconciles on settlement and recovers update failures", async ()
     registerShortcut: () => {},
     on: (event: string, handler: Handler) => handlers.set(event, handler),
     appendEntry: (type: string, data: unknown) => {
+      const entry = {
+        type: "custom",
+        id: `map-${appended.length + 1}`,
+        parentId: branch.at(-1)?.id ?? null,
+        timestamp: "2026-01-01T00:00:00Z",
+        customType: type,
+        data,
+      } as SessionEntry;
+      branch.push(entry);
       if (failAppend) {
         failAppend = false;
         throw new Error("persistence failed");
       }
       appended.push({ branch: branchName, type, data });
-      branch.push({
-        type: "custom",
-        id: `map-${appended.length}`,
-        parentId: branch.at(-1)?.id ?? null,
-        timestamp: "2026-01-01T00:00:00Z",
-        customType: type,
-        data,
-      } as SessionEntry);
     },
   } as unknown as ExtensionAPI;
 
@@ -1012,6 +1140,8 @@ test("lifecycle reconciles on settlement and recovers update failures", async ()
   branch = [...branch, userEntry("b3", "Finish branch B", "b2")];
   failAppend = true;
   await settle({}, ctx);
+  assert.equal(branch.at(-1)?.id, "b3");
+  assert.deepEqual(rollbackIds, ["b3"]);
   assert.equal(completeCalls, 4);
   await settle({}, ctx);
   assert.equal(completeCalls, 5);
@@ -1078,7 +1208,50 @@ test("compact and expanded panes render within their width", async () => {
     options.onHandle?.(handle);
     return Promise.resolve(undefined);
   }) as unknown as ExtensionContext["ui"]["custom"];
-  const branch: SessionEntry[] = [];
+  const branch: SessionEntry[] = [
+    ...entries,
+    {
+      type: "custom",
+      id: "pane-state",
+      parentId: "summary",
+      timestamp: "2026-01-01T00:00:04Z",
+      customType: "session-minimap-state",
+      data: {
+        version: 1,
+        callUsage: { ...usage(0, 0), cost: 0 },
+        revision: {
+          replaceCount: 0,
+          steps: [
+            {
+              version: 1,
+              throughEntryId: "assistant",
+              summary: "Completed authentication audit",
+              tools: { read: 1 },
+              skills: {},
+              decisions: ["Keep native session storage"],
+              errors: 0,
+              usage: { ...usage(100, 20), cost: 0.01 },
+              contextStart: { tokens: 10, percent: 10, contextWindow: 100 },
+              contextEnd: { tokens: 20, percent: 20, contextWindow: 100 },
+              createdAt: 1,
+            },
+          ],
+        },
+        open: {
+          throughEntryId: "result",
+          summary: "Repair authentication failure",
+          tools: { read: 1 },
+          skills: {},
+          decisions: ["Use bounded recovery retries"],
+          errors: 1,
+          usage: { ...usage(10, 2), cost: 0.01 },
+          contextStart: { tokens: 20, percent: 20, contextWindow: 100 },
+          contextEnd: { tokens: 30, percent: 30, contextWindow: 100 },
+          createdAt: 2,
+        },
+      },
+    } as SessionEntry,
+  ];
   const ctx = {
     mode: "tui",
     hasUI: true,
@@ -1103,5 +1276,8 @@ test("compact and expanded panes render within their width", async () => {
   shortcuts.get("ctrl+shift+m")?.();
   const expanded = component?.render(96) ?? [];
   assert.match(expanded.join("\n"), /Ctrl\+Shift\+M compact/);
+  assert.match(expanded.join("\n"), /Completed authentication audit/);
+  assert.match(expanded.join("\n"), /Failure review/);
+  assert.match(expanded.join("\n"), /Recent decisions/);
   assert.ok(expanded.every((line) => visibleWidth(line) <= 96));
 });
