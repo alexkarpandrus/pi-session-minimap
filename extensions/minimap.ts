@@ -22,9 +22,8 @@ import {
 
 const ENTRY_TYPE = "session-minimap-step";
 const STATE_ENTRY_TYPE = "session-minimap-open-step";
-const CORRECTION_ENTRY_TYPE = "session-minimap-step-correction";
-const RECONSTRUCTION_ENTRY_TYPE = "session-minimap-reconstruction";
 const STEP_VERSION = 1;
+const SUMMARY_TIMEOUT_MS = 60_000;
 const SUMMARY_SYSTEM_PROMPT = `Maintain a semantic minimap of an AI coding session.
 A step is one meaningful milestone. Related retries, corrections, questions, and refinements stay in that step.
 Use NEW when the deliverable or phase changes materially, even inside the same project: research to implementation, local verification to deployment, adding a new data source, redesigning the UI, or localization. Use CONTINUE only when the activity directly advances the current milestone. When uncertain, prefer NEW if the expected user-visible outcome changed.
@@ -34,19 +33,10 @@ CONTINUE or NEW
 A title-like 6-10 word summary of the current semantic step.
 Then zero to two lines formatted as DECISION: <agent-chosen direction>.
 Decisions are consequential directions or trade-offs chosen by the agent, not user requests, tool calls, routine implementation actions, or repeated prior decisions.
-When later evidence proves a settled title factually wrong, emit one line formatted CORRECT: <settled step number> | <replacement title>. Do not use CORRECT for mere wording improvements.
 Most turns should emit no DECISION lines. Do not record wording, layout, labels, icons, tests, refactors, or deferred follow-up work unless they preserve a consequential trade-off the user would need later.
-Title-correction mechanics and summarization behavior are routine implementation details, not decisions.
 For CONTINUE, rewrite the title to reflect the currently accepted outcome across the existing step and new activity. Remove rejected, declined, corrected, or superseded approaches instead of preserving them in the title. For NEW, summarize only the new activity.
 Never claim an approach was used, integrated, or implemented when it was only evaluated, compared, or rejected.
 Omit tool names, file names, commands, token stats, reload instructions, and implementation trivia.`;
-
-const REBUILD_SYSTEM_PROMPT = `Rebuild a semantic minimap for a session that has history but no completed steps.
-Group consecutive user requests into meaningful milestones. Start a new milestone when the deliverable or phase changes materially, even within the same project. Merge brief confirmations and direct follow-ups into the preceding milestone.
-Reply only with ascending lines in this format:
-STEP <last request number> | <6-10 word completed milestone title>
-CURRENT <last request number> | <6-10 word current milestone title>
-Use every request exactly once. The final line must be CURRENT and end at the final request number. Produce 2-8 milestones. Use the outcome evidence: never claim failed, rejected, or incomplete work was completed.`;
 
 type UsageSnapshot = Pick<
   Usage,
@@ -84,13 +74,6 @@ export interface MinimapStep {
   recovered?: true;
 }
 
-interface StepCorrection {
-  version: 1;
-  throughEntryId: string;
-  summary: string;
-  createdAt: number;
-}
-
 interface OpenStep {
   summary: string;
   throughEntryId: string;
@@ -109,13 +92,6 @@ interface OpenStateData {
   open?: OpenStep;
   closed?: true;
   usageOnly?: true;
-  callUsage: UsageSnapshot;
-}
-
-interface ReconstructionData {
-  version: 1;
-  steps: MinimapStep[];
-  open: OpenStep;
   callUsage: UsageSnapshot;
 }
 
@@ -178,18 +154,60 @@ const addUsage = (
   target.cost += typeof usage.cost === "number" ? usage.cost : usage.cost.total;
 };
 
-const isMinimapStep = (value: unknown): value is MinimapStep => {
-  if (!value || typeof value !== "object") return false;
-  const step = value as Partial<MinimapStep>;
-  return (
-    step.version === STEP_VERSION &&
-    typeof step.throughEntryId === "string" &&
-    typeof step.summary === "string" &&
-    typeof step.createdAt === "number" &&
-    !!step.usage &&
-    !!step.tools
-  );
-};
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  Boolean(value) && typeof value === "object" && !Array.isArray(value);
+
+const isFiniteNumber = (value: unknown): value is number =>
+  typeof value === "number" && Number.isFinite(value);
+
+const isUsageSnapshot = (value: unknown): value is UsageSnapshot =>
+  isRecord(value) &&
+  isFiniteNumber(value.input) &&
+  isFiniteNumber(value.output) &&
+  isFiniteNumber(value.cacheRead) &&
+  isFiniteNumber(value.cacheWrite) &&
+  isFiniteNumber(value.totalTokens) &&
+  isFiniteNumber(value.cost);
+
+const isCounts = (value: unknown): value is Record<string, number> =>
+  isRecord(value) && Object.values(value).every(isFiniteNumber);
+
+const isContextSnapshot = (value: unknown): value is ContextSnapshot =>
+  isRecord(value) &&
+  (value.tokens === null || isFiniteNumber(value.tokens)) &&
+  (value.percent === null || isFiniteNumber(value.percent)) &&
+  isFiniteNumber(value.contextWindow);
+
+const isStringArray = (value: unknown): value is string[] =>
+  Array.isArray(value) && value.every((item) => typeof item === "string");
+
+const isOpenStep = (value: unknown): value is OpenStep =>
+  isRecord(value) &&
+  typeof value.summary === "string" &&
+  typeof value.throughEntryId === "string" &&
+  isCounts(value.tools) &&
+  isCounts(value.skills) &&
+  (value.decisions === undefined || isStringArray(value.decisions)) &&
+  isFiniteNumber(value.errors) &&
+  isUsageSnapshot(value.usage) &&
+  isContextSnapshot(value.contextStart) &&
+  isContextSnapshot(value.contextEnd) &&
+  isFiniteNumber(value.createdAt);
+
+const isMinimapStep = (value: unknown): value is MinimapStep =>
+  isRecord(value) &&
+  value.version === STEP_VERSION &&
+  typeof value.throughEntryId === "string" &&
+  typeof value.summary === "string" &&
+  isCounts(value.tools) &&
+  (value.skills === undefined || isCounts(value.skills)) &&
+  (value.decisions === undefined || isStringArray(value.decisions)) &&
+  isFiniteNumber(value.errors) &&
+  isUsageSnapshot(value.usage) &&
+  (value.contextStart === undefined || isContextSnapshot(value.contextStart)) &&
+  (value.contextEnd === undefined || isContextSnapshot(value.contextEnd)) &&
+  isFiniteNumber(value.createdAt) &&
+  (value.recovered === undefined || value.recovered === true);
 
 const stepFromEntry = (entry: SessionEntry): MinimapStep | undefined =>
   entry.type === "custom" &&
@@ -198,50 +216,14 @@ const stepFromEntry = (entry: SessionEntry): MinimapStep | undefined =>
     ? entry.data
     : undefined;
 
-const correctionFromEntry = (
-  entry: SessionEntry,
-): StepCorrection | undefined => {
-  if (
-    entry.type !== "custom" ||
-    entry.customType !== CORRECTION_ENTRY_TYPE ||
-    !entry.data ||
-    typeof entry.data !== "object"
-  )
-    return undefined;
-  const correction = entry.data as Partial<StepCorrection>;
-  return correction.version === STEP_VERSION &&
-    typeof correction.throughEntryId === "string" &&
-    typeof correction.summary === "string" &&
-    typeof correction.createdAt === "number"
-    ? (correction as StepCorrection)
-    : undefined;
-};
-
-export const applyStepCorrections = (
-  steps: MinimapStep[],
-  entries: SessionEntry[],
-): MinimapStep[] => {
-  const corrections = new Map<string, string>();
-  for (const entry of entries) {
-    const correction = correctionFromEntry(entry);
-    if (correction)
-      corrections.set(correction.throughEntryId, correction.summary);
-  }
-  return steps.map((step) => {
-    const summary = corrections.get(step.throughEntryId);
-    return summary ? { ...step, summary } : step;
-  });
-};
-
-const isOpenStateData = (value: unknown): value is OpenStateData => {
-  if (!value || typeof value !== "object") return false;
-  const data = value as Partial<OpenStateData>;
-  return (
-    data.version === STEP_VERSION &&
-    !!data.callUsage &&
-    (!!data.open || data.closed === true || data.usageOnly === true)
-  );
-};
+const isOpenStateData = (value: unknown): value is OpenStateData =>
+  isRecord(value) &&
+  value.version === STEP_VERSION &&
+  isUsageSnapshot(value.callUsage) &&
+  (value.open === undefined || isOpenStep(value.open)) &&
+  (value.open !== undefined ||
+    value.closed === true ||
+    value.usageOnly === true);
 
 const openStateFromEntry = (entry: SessionEntry): OpenStateData | undefined =>
   entry.type === "custom" &&
@@ -250,41 +232,13 @@ const openStateFromEntry = (entry: SessionEntry): OpenStateData | undefined =>
     ? entry.data
     : undefined;
 
-const reconstructionFromEntry = (
-  entry: SessionEntry,
-): ReconstructionData | undefined => {
-  if (
-    entry.type !== "custom" ||
-    entry.customType !== RECONSTRUCTION_ENTRY_TYPE ||
-    !entry.data ||
-    typeof entry.data !== "object"
-  )
-    return undefined;
-  const data = entry.data as Partial<ReconstructionData>;
-  return data.version === STEP_VERSION &&
-    Array.isArray(data.steps) &&
-    data.steps.every(isMinimapStep) &&
-    !!data.open &&
-    !!data.callUsage
-    ? (data as ReconstructionData)
-    : undefined;
-};
-
 export const restoreSavedState = (
   branch: SessionEntry[],
   contextWindow = 0,
 ): Pick<ViewState, "steps" | "open"> => {
   const persisted: MinimapStep[] = [];
   let open: OpenStep | undefined;
-  let reconstructed = false;
   for (const entry of branch) {
-    const reconstruction = reconstructionFromEntry(entry);
-    if (reconstruction) {
-      persisted.splice(0, persisted.length, ...reconstruction.steps);
-      open = reconstruction.open;
-      reconstructed = true;
-      continue;
-    }
     const step = stepFromEntry(entry);
     if (step) {
       persisted.push(step);
@@ -313,14 +267,12 @@ export const restoreSavedState = (
     firstPersistedIndex,
     firstCheckpointIndex < 0 ? Number.MAX_SAFE_INTEGER : firstCheckpointIndex,
   );
-  const recoveredPrefix = reconstructed
-    ? []
-    : recoverHistoricalSteps(branch, contextWindow).filter(
-        (step) =>
-          !persistedIds.has(step.throughEntryId) &&
-          (entryIndexes.get(step.throughEntryId) ?? Number.MAX_SAFE_INTEGER) <
-            recoveryBoundary,
-      );
+  const recoveredPrefix = recoverHistoricalSteps(branch, contextWindow).filter(
+    (step) =>
+      !persistedIds.has(step.throughEntryId) &&
+      (entryIndexes.get(step.throughEntryId) ?? Number.MAX_SAFE_INTEGER) <
+        recoveryBoundary,
+  );
   const steps = inferStepContexts(
     [...recoveredPrefix, ...persisted],
     branch,
@@ -447,12 +399,6 @@ export const collectStats = (entries: SessionEntry[]): SessionStats => {
   };
 
   for (const entry of entries) {
-    const reconstruction = reconstructionFromEntry(entry);
-    if (reconstruction) {
-      addUsage(stats, reconstruction.callUsage);
-      stats.summaryTokens += reconstruction.callUsage.totalTokens;
-      continue;
-    }
     const openState = openStateFromEntry(entry);
     if (openState) {
       addUsage(stats, openState.callUsage);
@@ -779,47 +725,6 @@ export const conciseStep = (text: string, maxWords = 10): string => {
     .replace(/[,:-]+$/, "");
 };
 
-interface RebuiltMilestone {
-  endRequest: number;
-  summary: string;
-  current: boolean;
-}
-
-const parseRebuiltMilestones = (
-  text: string,
-  requestCount: number,
-): RebuiltMilestone[] => {
-  const milestones = text.split(/\r?\n/).flatMap((line) => {
-    const match = line.trim().match(/^(STEP|CURRENT)\s+(\d+)\s*\|\s*(.+)$/i);
-    const summary = conciseStep(match?.[3] ?? "");
-    return match && summary
-      ? [
-          {
-            endRequest: Number(match[2]),
-            summary,
-            current: match[1]?.toUpperCase() === "CURRENT",
-          },
-        ]
-      : [];
-  });
-  if (milestones.length < 2) return [];
-  let previous = 0;
-  for (const milestone of milestones) {
-    if (milestone.endRequest <= previous || milestone.endRequest > requestCount)
-      return [];
-    previous = milestone.endRequest;
-  }
-  if (
-    milestones.at(-1)?.endRequest !== requestCount ||
-    milestones.some(
-      (milestone, index) =>
-        milestone.current !== (index === milestones.length - 1),
-    )
-  )
-    return [];
-  return milestones;
-};
-
 export const readableGoal = (text: string): string => {
   const images = [...text.matchAll(/\.(?:png|jpe?g|gif|webp)/gi)];
   const first = images[0];
@@ -839,7 +744,7 @@ export const readableGoal = (text: string): string => {
 
 export const isConsequentialDecision = (text: string): boolean =>
   Boolean(conciseStep(text, 14)) &&
-  !/\b(?:wording|layout|labels?|icons?|tests?|refactor(?:ing)?|deferred follow-up|title corrections?)\b|\bcorrections? from later evidence\b/i.test(
+  !/\b(?:wording|layout|labels?|icons?|tests?|refactor(?:ing)?|deferred follow-up)\b/i.test(
     text,
   ) &&
   !/\b(?:suppress|sanitize)\b.*\b(?:commands?|paths?|volatile numbers?|error summaries?)\b/i.test(
@@ -898,32 +803,18 @@ export const parseSemanticDecision = (text: string, hasOpenStep: boolean) => {
     .filter(Boolean);
   const marker = lines[0]?.toUpperCase();
   if (hasOpenStep && marker !== "NEW" && marker !== "CONTINUE")
-    return {
-      startsNewStep: false,
-      summary: "",
-      decisions: [],
-      corrections: [],
-    };
+    return { startsNewStep: false, summary: "", decisions: [] };
   const content =
     marker === "NEW" || marker === "CONTINUE" ? lines.slice(1) : lines;
   const decisions = content
     .filter((line) => line.startsWith("DECISION:"))
     .map((line) => conciseStep(line.slice("DECISION:".length), 14))
     .filter(isConsequentialDecision);
-  const corrections = content.flatMap((line) => {
-    const match = line.match(/^CORRECT:\s*(\d+)\s*\|\s*(.+)$/);
-    const summary = conciseStep(match?.[2] ?? "");
-    return match && summary ? [{ step: Number(match[1]), summary }] : [];
-  });
-  const summary =
-    content.find(
-      (line) => !line.startsWith("DECISION:") && !line.startsWith("CORRECT:"),
-    ) ?? "";
+  const summary = content.find((line) => !line.startsWith("DECISION:")) ?? "";
   return {
     startsNewStep: hasOpenStep && marker === "NEW",
     summary: conciseStep(summary),
     decisions,
-    corrections,
   };
 };
 
@@ -1310,6 +1201,21 @@ class MinimapPane implements Component {
     this.tui.requestRender();
   }
 
+  private sessionData() {
+    const entries = this.getEntries();
+    const stats = collectStats(entries);
+    const context = this.getContextUsage();
+    const resets = collectContextResets(
+      entries,
+      context?.contextWindow ?? 0,
+      context?.tokens,
+    );
+    const entryIndexes = new Map(
+      entries.map((entry, index) => [entry.id, index]),
+    );
+    return { entries, stats, context, resets, entryIndexes };
+  }
+
   private renderExpanded(width: number): string[] {
     const th = this.theme;
     const { inner, border, row, wrappedRows } = paneFrame(th, width);
@@ -1336,19 +1242,10 @@ class MinimapPane implements Component {
         .join("  ");
     };
 
-    const entries = this.getEntries();
-    const stats = collectStats(entries);
+    const { entries, stats, context, resets, entryIndexes } =
+      this.sessionData();
     const efficiency = sessionEfficiency(entries, stats);
     const review = failureReview(entries, stats.tools);
-    const context = this.getContextUsage();
-    const resets = collectContextResets(
-      entries,
-      context?.contextWindow ?? 0,
-      context?.tokens,
-    );
-    const entryIndexes = new Map(
-      entries.map((entry, index) => [entry.id, index]),
-    );
     const lastBoundary =
       entryIndexes.get(this.state.steps.at(-1)?.throughEntryId ?? "") ?? -1;
     const liveEntries = entries.slice(lastBoundary + 1);
@@ -1722,17 +1619,7 @@ class MinimapPane implements Component {
       return "";
     };
 
-    const entries = this.getEntries();
-    const stats = collectStats(entries);
-    const context = this.getContextUsage();
-    const resets = collectContextResets(
-      entries,
-      context?.contextWindow ?? 0,
-      context?.tokens,
-    );
-    const entryIndexes = new Map(
-      entries.map((entry, index) => [entry.id, index]),
-    );
+    const { stats, context, resets, entryIndexes } = this.sessionData();
     const history: string[] = [];
     const cardStarts: number[] = [];
     let previousBoundary = -1;
@@ -1933,14 +1820,16 @@ export default function minimapExtension(pi: ExtensionAPI) {
   const restore = (ctx: ExtensionContext) => {
     const branch = ctx.sessionManager.getBranch();
     const restored = restoreSavedState(branch, ctx.model?.contextWindow ?? 0);
-    state.steps = applyStepCorrections(restored.steps, branch);
+    state.steps = restored.steps;
     state.open = restored.open;
   };
 
-  const appendOpenState = (callUsage: UsageSnapshot, closed = false) => {
-    const data: OpenStateData = { version: STEP_VERSION, callUsage };
-    if (closed) data.closed = true;
-    else if (state.open) data.open = state.open;
+  const appendOpenState = (callUsage: UsageSnapshot) => {
+    const data: OpenStateData = {
+      version: STEP_VERSION,
+      open: state.open,
+      callUsage,
+    };
     pi.appendEntry(STATE_ENTRY_TYPE, data);
   };
 
@@ -1960,188 +1849,6 @@ export default function minimapExtension(pi: ExtensionAPI) {
     };
     pi.appendEntry(ENTRY_TYPE, step);
     state.steps.push(step);
-  };
-
-  const rebuildUntrackedSession = async (
-    ctx: ExtensionContext,
-  ): Promise<"rebuilt" | "failed" | "busy" | undefined> => {
-    const branch = ctx.sessionManager.getBranch();
-    if (
-      !ctx.model ||
-      branch.some(
-        (entry) => stepFromEntry(entry) || reconstructionFromEntry(entry),
-      )
-    )
-      return undefined;
-    const generation = branchGeneration;
-    const requests = branch.flatMap((entry, index) => {
-      if (entry.type !== "message" || entry.message.role !== "user") return [];
-      const text = textContent(entry.message.content);
-      if (isStandaloneSkillInjection(text)) return [];
-      const summary = readableGoal(text);
-      return summary ? [{ entry, index, summary }] : [];
-    });
-    if (requests.length < 4) return undefined;
-    if (summaryRunning) {
-      summaryPending = true;
-      return "busy";
-    }
-
-    const failedRequests = new Set<number>();
-    const evidence = requests.map((request, index) => {
-      const nextIndex = requests[index + 1]?.index ?? branch.length;
-      const outcomeEntries = branch.slice(request.index + 1, nextIndex);
-      const assistants = outcomeEntries.flatMap((entry) =>
-        entry.type === "message" && entry.message.role === "assistant"
-          ? [entry.message]
-          : [],
-      );
-      const lastAssistant = assistants.at(-1);
-      const failed = lastAssistant
-        ? lastAssistant.stopReason === "error" ||
-          lastAssistant.stopReason === "aborted"
-        : outcomeEntries.some(
-            (entry) =>
-              entry.type === "message" &&
-              entry.message.role === "toolResult" &&
-              entry.message.isError,
-          );
-      if (failed) failedRequests.add(index + 1);
-      const outcome = assistants
-        .map((message) => conciseStep(textContent(message.content), 16))
-        .filter(Boolean)
-        .at(-1);
-      return `${index + 1}. Request: ${request.summary}\n   Outcome: ${
-        failed
-          ? "Failed or incomplete"
-          : (outcome ?? "No settled outcome recorded")
-      }`;
-    });
-
-    summaryRunning = true;
-    state.current = {
-      label: state.open?.summary ?? "Rebuilding session map",
-      tools: emptyCounts(),
-      errors: 0,
-    };
-    requestRender();
-    let callUsage = emptyUsage();
-    try {
-      const response = await ctx.modelRegistry.complete(
-        ctx.model,
-        {
-          systemPrompt: REBUILD_SYSTEM_PROMPT,
-          messages: [
-            {
-              role: "user",
-              content: [{ type: "text", text: evidence.join("\n") }],
-              timestamp: Date.now(),
-            },
-          ],
-        },
-        { cacheRetention: "none", maxTokens: 256 },
-      );
-      callUsage = usageSnapshot(response.usage);
-      if (response.stopReason === "error")
-        throw new Error(response.errorMessage || "model error");
-      const milestones = parseRebuiltMilestones(
-        textContent(response.content),
-        requests.length,
-      );
-      if (!milestones.length) throw new Error("invalid rebuilt session map");
-      for (const milestone of milestones.slice(0, -1)) {
-        if (failedRequests.has(milestone.endRequest))
-          throw new Error("failed request marked as completed");
-      }
-      if (generation !== branchGeneration) return "failed";
-
-      const finalBoundary = branch
-        .map((entry) => entry.type)
-        .lastIndexOf("message");
-      if (finalBoundary < 0) return "failed";
-      const completed: MinimapStep[] = [];
-      let segmentStart = 0;
-      for (const milestone of milestones.slice(0, -1)) {
-        const nextRequest = requests[milestone.endRequest];
-        const segmentEnd = nextRequest ? nextRequest.index - 1 : finalBoundary;
-        const segment = branch.slice(segmentStart, segmentEnd + 1);
-        const stats = collectStepStats(segment);
-        completed.push({
-          version: STEP_VERSION,
-          throughEntryId: branch[segmentEnd]?.id ?? "",
-          summary: milestone.summary,
-          recovered: true,
-          tools: stats.tools,
-          skills: stats.skills,
-          decisions: [],
-          errors: stats.errors,
-          usage: stats.usage,
-          createdAt:
-            Date.parse(
-              segment.find(
-                (entry) =>
-                  entry.type === "message" && entry.message.role === "user",
-              )?.timestamp ?? "",
-            ) || 0,
-        });
-        segmentStart = segmentEnd + 1;
-      }
-      const contextWindow =
-        ctx.getContextUsage()?.contextWindow ?? ctx.model.contextWindow ?? 0;
-      const inferred = inferStepContexts(completed, branch, contextWindow);
-      const current = milestones.at(-1);
-      const currentSegment = branch.slice(segmentStart, finalBoundary + 1);
-      const currentStats = collectStepStats(currentSegment);
-      const nextOpen: OpenStep = {
-        summary: current?.summary ?? "Current session work",
-        throughEntryId: branch[finalBoundary]?.id ?? "",
-        tools: currentStats.tools,
-        skills: currentStats.skills,
-        decisions: [],
-        errors: currentStats.errors,
-        usage: currentStats.usage,
-        contextStart:
-          inferred.at(-1)?.contextEnd ??
-          state.open?.contextStart ??
-          snapshotContext(ctx),
-        contextEnd: snapshotContext(ctx),
-        createdAt:
-          Date.parse(
-            currentSegment.find(
-              (entry) =>
-                entry.type === "message" && entry.message.role === "user",
-            )?.timestamp ?? "",
-          ) || Date.now(),
-      };
-      const reconstruction: ReconstructionData = {
-        version: STEP_VERSION,
-        steps: inferred,
-        open: nextOpen,
-        callUsage,
-      };
-      pi.appendEntry(RECONSTRUCTION_ENTRY_TYPE, reconstruction);
-      state.steps = inferred;
-      state.open = nextOpen;
-      return "rebuilt";
-    } catch {
-      if (generation === branchGeneration) {
-        pi.appendEntry(STATE_ENTRY_TYPE, {
-          version: STEP_VERSION,
-          callUsage,
-          usageOnly: true,
-        });
-        if (ctx.hasUI)
-          ctx.ui.notify(
-            "Minimap history rebuild failed; it will retry after the next run",
-            "warning",
-          );
-      }
-      return "failed";
-    } finally {
-      summaryRunning = false;
-      state.current = undefined;
-      requestRender();
-    }
   };
 
   const openPane = (ctx: ExtensionContext, hidden = false) => {
@@ -2225,7 +1932,6 @@ export default function minimapExtension(pi: ExtensionAPI) {
       startsNewStep: false,
       summary: state.open?.summary ?? fallbackSummary(pending),
       decisions: [] as string[],
-      corrections: [] as { step: number; summary: string }[],
     };
     let callUsage = emptyUsage();
     let summaryFailed = false;
@@ -2258,7 +1964,11 @@ export default function minimapExtension(pi: ExtensionAPI) {
             },
           ],
         },
-        { cacheRetention: "none", maxTokens: 256 },
+        {
+          cacheRetention: "none",
+          maxTokens: 256,
+          timeoutMs: SUMMARY_TIMEOUT_MS,
+        },
       );
       callUsage = usageSnapshot(response.usage);
       if (response.stopReason === "error")
@@ -2301,20 +2011,6 @@ export default function minimapExtension(pi: ExtensionAPI) {
       state.steps.at(-1)?.contextEnd ??
       now;
     const runStats = collectStepStats(pending);
-
-    for (const correction of decision.corrections) {
-      const index = correction.step - 1;
-      const step = state.steps[index];
-      if (!step || step.summary === correction.summary) continue;
-      const entry: StepCorrection = {
-        version: STEP_VERSION,
-        throughEntryId: step.throughEntryId,
-        summary: correction.summary,
-        createdAt: Date.now(),
-      };
-      pi.appendEntry(CORRECTION_ENTRY_TYPE, entry);
-      state.steps[index] = { ...step, summary: correction.summary };
-    }
 
     if (decision.startsNewStep && state.open) {
       const semanticStart = state.open.contextEnd;
@@ -2373,21 +2069,12 @@ export default function minimapExtension(pi: ExtensionAPI) {
   ): Promise<boolean> => {
     try {
       while (true) {
-        const rebuilt = await rebuildUntrackedSession(ctx);
-        if (rebuilt === "busy") return false;
-        if (!rebuilt) {
-          const mapped = await updateSemanticMap(ctx);
-          if (summaryPending && !summaryRunning) {
-            summaryPending = false;
-            continue;
-          }
-          return mapped;
-        }
-        if (summaryPending) {
+        const mapped = await updateSemanticMap(ctx);
+        if (summaryPending && !summaryRunning) {
           summaryPending = false;
           continue;
         }
-        return rebuilt === "rebuilt";
+        return mapped;
       }
     } catch {
       summaryRunning = false;
@@ -2469,10 +2156,6 @@ export default function minimapExtension(pi: ExtensionAPI) {
   pi.on("session_compact", (_event, _ctx) => requestRender());
   pi.on("model_select", (_event, _ctx) => requestRender());
 
-  pi.on("agent_end", async (_event, ctx) => {
-    if (ctx.isIdle()) await reconcileSemanticMap(ctx);
-  });
-
   pi.on("agent_settled", async (_event, ctx) => {
     let mapped = false;
     try {
@@ -2493,12 +2176,7 @@ export default function minimapExtension(pi: ExtensionAPI) {
     await reconcileSemanticMap(ctx);
   });
 
-  pi.on("session_shutdown", (event) => {
-    if (event.reason !== "reload" && state.open) {
-      finalizeOpen(state.open);
-      state.open = undefined;
-      appendOpenState(emptyUsage(), true);
-    }
+  pi.on("session_shutdown", () => {
     closePane?.();
     closePane = undefined;
     overlay = undefined;

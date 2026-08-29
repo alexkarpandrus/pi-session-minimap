@@ -38,7 +38,7 @@ Both views show:
 - agent and minimap-summary token spend
 - tool calls, compactions, overflow, and categorized errors
 - append-only semantic steps that span related follow-ups and retries
-- display-only recovery for sessions created before the extension was installed
+- display-only recovery from compaction summaries for older sessions
 
 ## Install
 
@@ -69,10 +69,9 @@ The compact pane opens automatically in interactive terminals that are at least 
 
 Related follow-ups, questions, retries, and refinements stay in one milestone. A new step starts when the deliverable or phase changes materially, even within the same project.
 
-Completed steps are append-only. The open step is checkpointed for resume. Later factual title corrections are stored as overlays, so the original history stays unchanged.
-Long sessions that predate reliable step boundaries are rebuilt into recovered milestones instead of leaving history empty.
+Completed steps are append-only. The open step is checkpointed for resume and stays open until later activity starts a materially different step.
 
-The extension re-evaluates the map when each agent run becomes idle and again when the agent fully settles. It uses the currently selected model to classify semantic boundaries, stores compact metadata in the pi session file, and never takes terminal focus.
+The extension re-evaluates the map when each agent run fully settles. It uses the currently selected model to classify semantic boundaries, stores compact metadata in the pi session file, and never takes terminal focus.
 
 ## Development
 

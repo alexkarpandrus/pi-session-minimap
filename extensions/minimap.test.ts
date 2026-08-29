@@ -4,11 +4,16 @@ import type {
   ExtensionAPI,
   ExtensionContext,
   SessionEntry,
+  Theme,
 } from "@earendil-works/pi-coding-agent";
-import { visibleWidth } from "@earendil-works/pi-tui";
+import {
+  visibleWidth,
+  type Component,
+  type OverlayHandle,
+  type TUI,
+} from "@earendil-works/pi-tui";
 import minimapExtension, {
   alignScrollStart,
-  applyStepCorrections,
   categorizeError,
   collectStats,
   collectContextResets,
@@ -280,6 +285,37 @@ test("finalized steps close matching restored checkpoints", () => {
   );
 });
 
+test("malformed persisted minimap entries are ignored", () => {
+  const malformed = (id: string, customType: string, data: unknown) =>
+    ({
+      type: "custom",
+      id,
+      parentId: null,
+      timestamp: "2026-01-01T00:00:00Z",
+      customType,
+      data,
+    }) as SessionEntry;
+  const branch = [
+    malformed("bad-step", "session-minimap-step", {
+      version: 1,
+      throughEntryId: "result",
+      summary: "Bad step",
+      tools: {},
+      errors: 0,
+      usage: "corrupt",
+      createdAt: 1,
+    }),
+    malformed("bad-open", "session-minimap-open-step", {
+      version: 1,
+      callUsage: "corrupt",
+      open: "corrupt",
+    }),
+  ];
+
+  assert.deepEqual(restoreSavedState(branch), { steps: [], open: undefined });
+  assert.equal(collectStats(branch).summaryTokens, 0);
+});
+
 test("long minimap text wraps fully instead of clipping", () => {
   const summary =
     "Installed the session minimap extension and verified that the local package loads correctly.";
@@ -313,20 +349,17 @@ test("semantic decisions can continue across user messages", () => {
       startsNewStep: false,
       summary: "Improved minimap readability",
       decisions: [],
-      corrections: [],
     },
   );
   assert.deepEqual(parseSemanticDecision("NEW\nAdded context history", true), {
     startsNewStep: true,
     summary: "Added context history",
     decisions: [],
-    corrections: [],
   });
   assert.deepEqual(parseSemanticDecision("Missing marker", true), {
     startsNewStep: false,
     summary: "",
     decisions: [],
-    corrections: [],
   });
   assert.deepEqual(
     parseSemanticDecision(
@@ -339,7 +372,6 @@ test("semantic decisions can continue across user messages", () => {
       decisions: [
         "Keep the pane non-capturing and use global scroll shortcuts",
       ],
-      corrections: [],
     },
   );
 });
@@ -350,8 +382,6 @@ test("routine minimap mechanics are not recorded as decisions", () => {
       "CONTINUE",
       "Improved minimap accuracy",
       "DECISION: Keep AgentsView excluded",
-      "DECISION: Use append-only title corrections rather than rewriting history",
-      "DECISION: Infer corrections from later evidence automatically",
     ].join("\n"),
     true,
   );
@@ -362,26 +392,6 @@ test("routine minimap mechanics are not recorded as decisions", () => {
       "Suppress commands, paths, secrets, and volatile numbers in repeated error summaries",
     ),
     false,
-  );
-});
-
-test("semantic summaries can correct factually wrong settled titles", () => {
-  assert.deepEqual(
-    parseSemanticDecision(
-      "CONTINUE\nImproved minimap accuracy\nCORRECT: 5 | Evaluated AgentsView and improved minimap density",
-      true,
-    ),
-    {
-      startsNewStep: false,
-      summary: "Improved minimap accuracy",
-      decisions: [],
-      corrections: [
-        {
-          step: 5,
-          summary: "Evaluated AgentsView and improved minimap density",
-        },
-      ],
-    },
   );
 });
 
@@ -584,9 +594,9 @@ test("live labels ignore leading and trailing screenshot paths", () => {
   );
   assert.equal(
     readableGoal(
-      "Infer append-only historical title corrections automatically Worked on /var/tmp/screenshot.png",
+      "Improve historical summaries automatically Worked on /var/tmp/screenshot.png",
     ),
-    "Infer append-only historical title corrections automatically",
+    "Improve historical summaries automatically",
   );
 });
 
@@ -1033,221 +1043,7 @@ test("legacy recovery replaces generic continuation prompts with compaction goal
   );
 });
 
-test("step corrections preserve history while latest title wins", () => {
-  const step = {
-    version: 1,
-    throughEntryId: "result",
-    summary: "Improving minimap density with cached AgentsView health data",
-    tools: {},
-    errors: 0,
-    usage: { ...usage(0, 0), cost: 0 },
-    createdAt: 1,
-  } satisfies MinimapStep;
-  const corrections = [
-    {
-      type: "custom",
-      id: "correction-1",
-      parentId: "step",
-      timestamp: "2026-01-01T00:00:04Z",
-      customType: "session-minimap-step-correction",
-      data: {
-        version: 1,
-        throughEntryId: "result",
-        summary: "Evaluated AgentsView",
-        createdAt: 2,
-      },
-    },
-    {
-      type: "custom",
-      id: "correction-2",
-      parentId: "correction-1",
-      timestamp: "2026-01-01T00:00:05Z",
-      customType: "session-minimap-step-correction",
-      data: {
-        version: 1,
-        throughEntryId: "result",
-        summary: "Evaluated AgentsView and improved minimap density",
-        createdAt: 3,
-      },
-    },
-  ] as SessionEntry[];
-
-  const [corrected] = applyStepCorrections([step], corrections);
-  assert.equal(
-    corrected?.summary,
-    "Evaluated AgentsView and improved minimap density",
-  );
-  assert.equal(
-    step.summary,
-    "Improving minimap density with cached AgentsView health data",
-  );
-});
-
-test("lifecycle rebuilds long sessions that have no completed steps", async () => {
-  const snapshot = { ...usage(0, 0), cost: 0 };
-  const user = (id: string, parentId: string | null, content: string) =>
-    ({
-      type: "message",
-      id,
-      parentId,
-      timestamp: `2026-01-01T00:0${id.at(-1)}:00Z`,
-      message: { role: "user", content, timestamp: 1 },
-    }) as SessionEntry;
-  const assistant = (id: string, parentId: string) =>
-    ({
-      type: "message",
-      id,
-      parentId,
-      timestamp: `2026-01-01T00:0${id.at(-1)}:30Z`,
-      message: {
-        role: "assistant",
-        content: [{ type: "text", text: "Done" }],
-        api: "test",
-        provider: "test",
-        model: "test",
-        usage: usage(20, 2),
-        stopReason: "stop",
-        timestamp: 2,
-      },
-    }) as SessionEntry;
-  const branch = [
-    user("user-1", null, "Build the restaurant site"),
-    assistant("assistant-1", "user-1"),
-    {
-      type: "compaction",
-      id: "compact-1",
-      parentId: "assistant-1",
-      timestamp: "2026-01-01T00:01:45Z",
-      summary: "## Goal\nBuild the restaurant site",
-      firstKeptEntryId: "user-1",
-      tokensBefore: 90,
-    } as SessionEntry,
-    user("user-2", "compact-1", "Deploy the custom domain"),
-    assistant("assistant-2", "user-2"),
-    user("user-3", "assistant-2", "Add more restaurant sources"),
-    assistant("assistant-3", "user-3"),
-    user("user-4", "assistant-3", "Simplify the UI and add English"),
-    assistant("assistant-4", "user-4"),
-    {
-      type: "custom",
-      id: "checkpoint",
-      parentId: "assistant-4",
-      timestamp: "2026-01-01T00:05:00Z",
-      customType: "session-minimap-open-step",
-      data: {
-        version: 1,
-        callUsage: snapshot,
-        open: {
-          summary: "Build the restaurant site",
-          throughEntryId: "assistant-4",
-          tools: {},
-          skills: {},
-          decisions: [],
-          errors: 0,
-          usage: { ...usage(80, 8), cost: 0.08 },
-          contextStart: { tokens: 0, percent: 0, contextWindow: 100 },
-          contextEnd: { tokens: 80, percent: 80, contextWindow: 100 },
-          createdAt: 1,
-        },
-      },
-    },
-  ] as SessionEntry[];
-  type Handler = (event: unknown, ctx: ExtensionContext) => unknown;
-  const handlers = new Map<string, Handler>();
-  const appended: Array<{ type: string; data: unknown }> = [];
-  let completeCalls = 0;
-  let failReconstruction = true;
-  const ctx = {
-    mode: "rpc",
-    hasUI: false,
-    model: { contextWindow: 100 },
-    sessionManager: { getBranch: () => branch },
-    modelRegistry: {
-      complete: async () => {
-        completeCalls++;
-        return {
-          role: "assistant",
-          content: [
-            {
-              type: "text",
-              text: [
-                "STEP 1 | Build the restaurant menu MVP",
-                "STEP 2 | Deploy the custom production domain",
-                "STEP 3 | Expand supported restaurant menu sources",
-                "CURRENT 4 | Simplify and localize the user interface",
-              ].join("\n"),
-            },
-          ],
-          api: "test",
-          provider: "test",
-          model: "test",
-          usage: usage(1, 1),
-          stopReason: "stop",
-          timestamp: 1,
-        };
-      },
-    },
-    getContextUsage: () => ({ tokens: 80, percent: 80, contextWindow: 100 }),
-  } as unknown as ExtensionContext;
-  const pi = {
-    registerCommand: () => {},
-    registerShortcut: () => {},
-    on: (event: string, handler: Handler) => handlers.set(event, handler),
-    appendEntry: (type: string, data: unknown) => {
-      if (type === "session-minimap-reconstruction" && failReconstruction) {
-        failReconstruction = false;
-        throw new Error("persistence failed");
-      }
-      appended.push({ type, data });
-    },
-  } as unknown as ExtensionAPI;
-
-  minimapExtension(pi);
-  await handlers.get("session_start")?.({}, ctx);
-  await handlers.get("session_start")?.({}, ctx);
-
-  const reconstruction = appended.find(
-    (entry) => entry.type === "session-minimap-reconstruction",
-  );
-  const data = reconstruction?.data as {
-    steps: MinimapStep[];
-    open: { summary: string };
-  };
-  assert.deepEqual(
-    data.steps.map((step) => step.summary),
-    [
-      "Build the restaurant menu MVP",
-      "Deploy the custom production domain",
-      "Expand supported restaurant menu sources",
-    ],
-  );
-  assert.ok(data.steps.every((step) => step.recovered));
-  assert.equal(data.open.summary, "Simplify and localize the user interface");
-  assert.equal(
-    appended.filter((entry) => entry.type === "session-minimap-reconstruction")
-      .length,
-    1,
-  );
-
-  const persisted = {
-    type: "custom",
-    id: "reconstruction",
-    parentId: "checkpoint",
-    timestamp: "2026-01-01T00:06:00Z",
-    customType: "session-minimap-reconstruction",
-    data: reconstruction?.data,
-  } as SessionEntry;
-  const restored = restoreSavedState([...branch, persisted], 100);
-  assert.deepEqual(
-    restored.steps.map((step) => step.summary),
-    data.steps.map((step) => step.summary),
-  );
-  assert.equal(restored.open?.summary, data.open.summary);
-  assert.equal(collectStats([...branch, persisted]).summaryTokens, 2);
-  assert.equal(completeCalls, 2);
-});
-
-test("lifecycle reconciles on idle agent end and recovers update failures", async () => {
+test("lifecycle reconciles on settlement and recovers update failures", async () => {
   const userEntry = (
     id: string,
     content: string,
@@ -1281,6 +1077,7 @@ test("lifecycle reconciles on idle agent end and recovers update failures", asyn
   let branchName = "A";
   let branch = [userEntry("a1", "Work on branch A")];
   let completeCalls = 0;
+  const completionOptions: unknown[] = [];
   let failAppend = false;
   let resolveFirst = (_response: Completion) => {};
   const firstResponse = new Promise<Completion>((resolve) => {
@@ -1293,7 +1090,8 @@ test("lifecycle reconciles on idle agent end and recovers update failures", asyn
     model: { contextWindow: 100 },
     sessionManager: { getBranch: () => branch },
     modelRegistry: {
-      complete: async () => {
+      complete: async (...args: unknown[]) => {
+        completionOptions.push(args[2]);
         completeCalls++;
         if (completeCalls === 1) return firstResponse;
         if (completeCalls === 2) return completion("NEW\nBranch B");
@@ -1302,7 +1100,6 @@ test("lifecycle reconciles on idle agent end and recovers update failures", asyn
       },
     },
     getContextUsage: () => ({ tokens: 10, percent: 10, contextWindow: 100 }),
-    isIdle: () => true,
     ui: { notify: (message: string) => notices.push(message) },
   } as unknown as ExtensionContext;
   const pi = {
@@ -1320,10 +1117,10 @@ test("lifecycle reconciles on idle agent end and recovers update failures", asyn
 
   minimapExtension(pi);
   assert.ok(commands.includes("minimap"));
-  const end = handlers.get("agent_end");
   const settle = handlers.get("agent_settled");
   const switchTree = handlers.get("session_tree");
-  assert.ok(end && settle && switchTree);
+  const shutdown = handlers.get("session_shutdown");
+  assert.ok(settle && switchTree && shutdown);
 
   const settlingA = Promise.resolve(settle({}, ctx));
   await Promise.resolve();
@@ -1335,12 +1132,17 @@ test("lifecycle reconciles on idle agent end and recovers update failures", asyn
   await Promise.all([settlingA, switching]);
 
   assert.equal(completeCalls, 2);
+  assert.deepEqual(completionOptions.at(-1), {
+    cacheRetention: "none",
+    maxTokens: 256,
+    timeoutMs: 60_000,
+  });
   assert.ok(appended.every((entry) => entry.branch === "B"));
   assert.equal(JSON.stringify(appended).includes("Branch A"), false);
   assert.equal(JSON.stringify(appended).includes("Branch B"), true);
 
   branch = [...branch, userEntry("b2", "Retry branch B", "b1")];
-  await end({}, ctx);
+  await settle({}, ctx);
   assert.equal(completeCalls, 3);
   assert.deepEqual(notices, [
     "Minimap summary failed; it will retry after the next run",
@@ -1366,4 +1168,69 @@ test("lifecycle reconciles on idle agent end and recovers update failures", asyn
     Object.hasOwn(appended.at(-1)?.data as object, "summaryError"),
     false,
   );
+  const beforeShutdown = appended.length;
+  shutdown({ reason: "quit" }, ctx);
+  assert.equal(appended.length, beforeShutdown);
+});
+
+test("compact and expanded panes render within their width", async () => {
+  type Handler = (event: unknown, ctx: ExtensionContext) => unknown;
+  const handlers = new Map<string, Handler>();
+  const shortcuts = new Map<string, () => void>();
+  let component: Component | undefined;
+  let hidden = false;
+  const tui = {
+    requestRender: () => {},
+    terminal: { rows: 40 },
+  } as unknown as TUI;
+  const theme = {
+    fg: (_color: string, text: string) => text,
+    bg: (_color: string, text: string) => text,
+    bold: (text: string) => text,
+  } as unknown as Theme;
+  const handle = {
+    setHidden: (value: boolean) => {
+      hidden = value;
+    },
+    isHidden: () => hidden,
+  } as unknown as OverlayHandle;
+  const custom = ((
+    factory: (
+      tui: TUI,
+      theme: Theme,
+      keybindings: never,
+      done: () => void,
+    ) => Component,
+    options: { onHandle?: (value: OverlayHandle) => void },
+  ) => {
+    component = factory(tui, theme, {} as never, () => {});
+    options.onHandle?.(handle);
+    return Promise.resolve(undefined);
+  }) as unknown as ExtensionContext["ui"]["custom"];
+  const branch: SessionEntry[] = [];
+  const ctx = {
+    mode: "tui",
+    hasUI: true,
+    sessionManager: { getBranch: () => branch },
+    getContextUsage: () => ({ tokens: 10, percent: 10, contextWindow: 100 }),
+    ui: { custom, notify: () => {} },
+  } as unknown as ExtensionContext;
+  const pi = {
+    registerCommand: () => {},
+    registerShortcut: (key: string, options: { handler: () => void }) =>
+      shortcuts.set(key, options.handler),
+    on: (event: string, handler: Handler) => handlers.set(event, handler),
+    appendEntry: () => {},
+  } as unknown as ExtensionAPI;
+
+  minimapExtension(pi);
+  await handlers.get("session_start")?.({}, ctx);
+  const compact = component?.render(72) ?? [];
+  assert.ok(compact.length > 0);
+  assert.ok(compact.every((line) => visibleWidth(line) <= 72));
+
+  shortcuts.get("ctrl+shift+m")?.();
+  const expanded = component?.render(96) ?? [];
+  assert.match(expanded.join("\n"), /Ctrl\+Shift\+M compact/);
+  assert.ok(expanded.every((line) => visibleWidth(line) <= 96));
 });
