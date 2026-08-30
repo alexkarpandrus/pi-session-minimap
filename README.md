@@ -7,6 +7,7 @@
 <p align="center"><strong>Never lose the plot in a long pi session.</strong></p>
 
 <p align="center">
+  <a href="https://www.npmjs.com/package/pi-session-minimap"><img src="https://img.shields.io/npm/v/pi-session-minimap?color=8bd5ca" alt="npm version"></a>
   <a href="https://github.com/alexkarpandrus/pi-session-minimap/actions/workflows/ci.yml"><img src="https://github.com/alexkarpandrus/pi-session-minimap/actions/workflows/ci.yml/badge.svg" alt="CI status"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-667eea" alt="MIT license"></a>
   <a href="https://pi.dev/packages"><img src="https://img.shields.io/badge/pi-package-cad3f5" alt="pi package"></a>
