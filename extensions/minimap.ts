@@ -15,9 +15,7 @@ import {
   usageSnapshot,
   type ContextSnapshot,
   type MinimapStateData,
-  type StepRevision,
   type TailSource,
-  type UsageSnapshot,
   type ViewState,
 } from "./minimap/state.ts";
 import { textContent } from "./minimap/diagnostics.ts";
@@ -83,13 +81,15 @@ export default function minimapExtension(pi: ExtensionAPI) {
   let runContextStart: ContextSnapshot | undefined;
   let expanded = false;
   let paneContext: ExtensionContext | undefined;
+  let pendingPersistence:
+    | { generation: number; data: MinimapStateData }
+    | undefined;
 
   const snapshotContext = (ctx: ExtensionContext): ContextSnapshot => {
     const usage = ctx.getContextUsage();
     return {
       tokens: usage?.tokens ?? null,
       percent: usage?.percent ?? null,
-      contextWindow: usage?.contextWindow ?? ctx.model?.contextWindow ?? 0,
     };
   };
 
@@ -117,19 +117,6 @@ export default function minimapExtension(pi: ExtensionAPI) {
       }
       throw error;
     }
-  };
-
-  const appendState = (
-    ctx: ExtensionContext,
-    callUsage: UsageSnapshot,
-    revision: StepRevision,
-  ) => {
-    appendPersistedState(ctx, {
-      version: STEP_VERSION,
-      ...(state.open ? { open: state.open } : {}),
-      revision,
-      callUsage,
-    });
   };
 
   const openPane = (ctx: ExtensionContext, hidden = false) => {
@@ -181,8 +168,21 @@ export default function minimapExtension(pi: ExtensionAPI) {
       summaryPending = true;
       return false;
     }
-    if (!ctx.model) return false;
     const generation = branchGeneration;
+    if (pendingPersistence) {
+      if (pendingPersistence.generation !== generation) {
+        pendingPersistence = undefined;
+      } else {
+        appendPersistedState(ctx, pendingPersistence.data);
+        pendingPersistence = undefined;
+        restore(ctx);
+        state.current = undefined;
+        runContextStart = undefined;
+        requestRender();
+        return true;
+      }
+    }
+    if (!ctx.model) return false;
     const branch = ctx.sessionManager.getBranch();
     const openAtStart = state.open;
     const recentSteps = state.steps.slice(-5);
@@ -193,7 +193,6 @@ export default function minimapExtension(pi: ExtensionAPI) {
     const pendingSegments = splitPendingActivity(pending);
     if (!pendingSegments.length) return true;
     const newSegments = pendingSegments.slice(0, MAX_PENDING_SOURCES);
-    const hasMoreNewSegments = pendingSegments.length > newSegments.length;
     const newSourceIds = newSegments.map((_segment, index) =>
       newSegments.length === 1 ? "NEW" : `N${index + 1}`,
     );
@@ -297,7 +296,6 @@ export default function minimapExtension(pi: ExtensionAPI) {
     const unknownContext: ContextSnapshot = {
       tokens: null,
       percent: null,
-      contextWindow: now.contextWindow,
     };
     const runStart =
       runContextStart ??
@@ -334,14 +332,24 @@ export default function minimapExtension(pi: ExtensionAPI) {
         ? state.steps[settledPrefixCount - 1]?.throughEntryId
         : undefined;
     const { completed, open } = reconcileTail(branch, boundary, sources, plan);
+    const data: MinimapStateData = {
+      version: STEP_VERSION,
+      open,
+      revision: {
+        replaceCount: recentSteps.length,
+        steps: completed,
+      },
+      callUsage,
+    };
+    try {
+      appendPersistedState(ctx, data);
+    } catch (error) {
+      pendingPersistence = { generation, data };
+      throw error;
+    }
     state.steps.splice(settledPrefixCount, recentSteps.length, ...completed);
     state.open = open;
-    appendState(ctx, callUsage, {
-      replaceCount: recentSteps.length,
-      steps: completed,
-    });
     state.current = undefined;
-    if (hasMoreNewSegments) summaryPending = true;
     runContextStart = undefined;
     summaryRunning = false;
     requestRender();

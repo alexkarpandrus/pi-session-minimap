@@ -63,8 +63,6 @@ export const collectContextResets = (
       afterTokens = currentTokens;
     resets.push({
       entryIndex,
-      beforeTokens: entry.tokensBefore,
-      ...(afterTokens === undefined ? {} : { afterTokens }),
       beforePercent:
         contextWindow > 0 ? (entry.tokensBefore / contextWindow) * 100 : null,
       afterPercent:
@@ -101,6 +99,10 @@ export const collectStats = (entries: SessionEntry[]): SessionStats => {
       const message = entry.message;
       addUsage(stats, message.usage);
       stats.agentTokens += message.usage.totalTokens;
+      if (message.stopReason === "error") {
+        stats.errors++;
+        stats.errorKinds.model = (stats.errorKinds.model ?? 0) + 1;
+      }
       for (const content of message.content) {
         if (content.type === "toolCall") {
           stats.tools[content.name] = (stats.tools[content.name] ?? 0) + 1;
@@ -130,13 +132,11 @@ export const collectStepStats = (entries: SessionEntry[]) => {
   const stats = collectStats(entries.filter((entry) => !stateFromEntry(entry)));
   return {
     tools: stats.tools,
-    skills: extractSkills(entries),
     errors: stats.errors,
     usage: {
       input: stats.input,
       output: stats.output,
       cacheRead: stats.cacheRead,
-      cacheWrite: stats.cacheWrite,
       totalTokens: stats.agentTokens,
       cost: stats.cost,
     },
@@ -282,6 +282,14 @@ export const failureReview = (
     recovered++;
     streak = 0;
   };
+  const recordFailure = (type: string, pattern: string) => {
+    if (!streak) runs++;
+    streak++;
+    maxStreak = Math.max(maxStreak, streak);
+    total++;
+    byType[type] = (byType[type] ?? 0) + 1;
+    patternCounts.set(pattern, (patternCounts.get(pattern) ?? 0) + 1);
+  };
 
   for (const entry of entries) {
     if (entry.type !== "message") continue;
@@ -291,22 +299,22 @@ export const failureReview = (
         recover();
         continue;
       }
-      if (!streak) runs++;
-      streak++;
-      maxStreak = Math.max(maxStreak, streak);
-      total++;
       failuresByTool[message.toolName] =
         (failuresByTool[message.toolName] ?? 0) + 1;
       const type = categorizeError(message);
-      byType[type] = (byType[type] ?? 0) + 1;
-      const pattern = `${oneLine(message.toolName, 24)}: ${failurePatternDetail(message.content, type)}`;
-      patternCounts.set(pattern, (patternCounts.get(pattern) ?? 0) + 1);
-    } else if (
-      message.role === "assistant" &&
-      message.stopReason !== "toolUse" &&
-      message.stopReason !== "error"
-    ) {
-      recover();
+      recordFailure(
+        type,
+        `${oneLine(message.toolName, 24)}: ${failurePatternDetail(message.content, type)}`,
+      );
+    } else if (message.role === "assistant") {
+      if (message.stopReason === "error") {
+        recordFailure(
+          "model",
+          `model: ${oneLine(message.errorMessage ?? "model failure")}`,
+        );
+      } else if (message.stopReason !== "toolUse") {
+        recover();
+      }
     }
   }
 

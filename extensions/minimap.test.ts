@@ -115,6 +115,53 @@ test("collectStats separates agent and minimap usage", () => {
   assert.deepEqual({ ...stats.toolTokens }, { read: 12 });
 });
 
+test("model failures appear in diagnostics and recovery analysis", () => {
+  const assistant = (
+    id: string,
+    stopReason: "stop" | "error",
+    errorMessage?: string,
+  ) =>
+    ({
+      type: "message",
+      id,
+      parentId: null,
+      timestamp: `2026-01-01T00:00:0${id}Z`,
+      message: {
+        role: "assistant",
+        content: [],
+        api: "test",
+        provider: "test",
+        model: "test",
+        usage: usage(1, 1),
+        stopReason,
+        ...(errorMessage ? { errorMessage } : {}),
+        timestamp: Number(id),
+      },
+    }) as SessionEntry;
+  const branch = [
+    assistant("1", "error", "provider unavailable"),
+    assistant("2", "stop"),
+  ];
+
+  const stats = collectStats(branch);
+  assert.equal(stats.errors, 1);
+  assert.deepEqual({ ...stats.errorKinds }, { model: 1 });
+  assert.equal(sessionEfficiency(branch, stats).failureRate, 50);
+
+  const review = failureReview(branch, {});
+  assert.deepEqual(
+    {
+      total: review.total,
+      runs: review.runs,
+      recovered: review.recovered,
+      unresolved: review.unresolved,
+      maxStreak: review.maxStreak,
+    },
+    { total: 1, runs: 1, recovered: 1, unresolved: 0, maxStreak: 1 },
+  );
+  assert.deepEqual({ ...review.byType }, { model: 1 });
+});
+
 test("entriesAfter slices after a persisted boundary", () => {
   assert.deepEqual(
     entriesAfter(entries, "result").map((entry) => entry.id),
@@ -482,8 +529,9 @@ test("native session efficiency stays factual and comparable", () => {
   assert.deepEqual(efficiency, {
     elapsedMs: 3_000,
     calls: 4,
+    attempts: 5,
     cacheShare: 75,
-    failureRate: 25,
+    failureRate: 20,
     mapOverhead: 10,
   });
   assert.equal(elapsedLabel(3_000), "3s");
@@ -576,8 +624,6 @@ test("dashboard graphics compress context without hiding resets", () => {
     dashboardContextLabel(89, 44, [
       {
         entryIndex: 1,
-        beforeTokens: 290,
-        afterTokens: 44,
         beforePercent: 145,
         afterPercent: 22,
       },
@@ -588,13 +634,11 @@ test("dashboard graphics compress context without hiding resets", () => {
     dashboardContextLabel(44, 73, [
       {
         entryIndex: 1,
-        beforeTokens: 180,
         beforePercent: 91,
         afterPercent: 24,
       },
       {
         entryIndex: 2,
-        beforeTokens: 208,
         beforePercent: 104,
         afterPercent: 22,
       },
@@ -698,8 +742,6 @@ test("context resets are derived from compaction entries", () => {
   assert.deepEqual(collectContextResets(resetEntries, 200), [
     {
       entryIndex: 0,
-      beforeTokens: 160,
-      afterTokens: 70,
       beforePercent: 80,
       afterPercent: 35,
     },
@@ -723,8 +765,8 @@ test("current context only fills the latest unresolved compaction", () => {
     25,
   );
 
-  assert.equal(resets[0]?.afterTokens, undefined);
-  assert.equal(resets[1]?.afterTokens, 25);
+  assert.equal(resets[0]?.afterPercent, null);
+  assert.equal(resets[1]?.afterPercent, 25);
 });
 
 test("settled semantic threads are not shown as active work", () => {
@@ -868,7 +910,10 @@ test("tail reconciliation merges steps and recomputes their data", async () => {
   assert.equal(Object.hasOwn(restored.open ?? {}, "version"), false);
   assert.deepEqual({ ...restored.steps[0]?.tools }, { read: 1, edit: 1 });
   assert.deepEqual(restored.steps[0]?.usage, {
-    ...usage(30, 5),
+    input: 30,
+    output: 5,
+    cacheRead: 0,
+    totalTokens: 35,
     cost: 0.02,
   });
   assert.deepEqual(restored.steps[0]?.decisions, [
@@ -876,7 +921,13 @@ test("tail reconciliation merges steps and recomputes their data", async () => {
   ]);
   assert.deepEqual({ ...restored.open?.tools }, { test: 1 });
   assert.equal(restored.open?.errors, 1);
-  assert.deepEqual(restored.open?.usage, { ...usage(35, 5), cost: 0.02 });
+  assert.deepEqual(restored.open?.usage, {
+    input: 35,
+    output: 5,
+    cacheRead: 0,
+    totalTokens: 40,
+    cost: 0.02,
+  });
   assert.deepEqual(
     [
       restored.steps[0]?.contextStart?.tokens,
@@ -978,6 +1029,8 @@ test("fresh history is reconstructed into ordered semantic steps", async () => {
 
   minimapExtension(pi);
   await handlers.get("session_start")?.({}, ctx);
+  assert.equal(completeCalls, 1);
+  await handlers.get("agent_settled")?.({}, ctx);
 
   assert.equal(completeCalls, 2);
   assert.ok(prompts.every((prompt) => prompt.length < 20_000));
@@ -1072,7 +1125,7 @@ test("lifecycle reconciles on settlement and recovers update failures", async ()
         if (completeCalls === 1) return firstResponse;
         if (completeCalls === 2) return completion("STEP NEW | Branch B");
         if (completeCalls === 3) return completion("", "error");
-        if (completeCalls === 6) return shutdownResponse;
+        if (branch.at(-1)?.id === "b4") return shutdownResponse;
         return completion("STEP CURRENT+N1+N2 | Branch B recovered");
       },
     },
@@ -1152,13 +1205,13 @@ test("lifecycle reconciles on settlement and recovers update failures", async ()
   assert.deepEqual(rollbackIds, ["b3"]);
   assert.equal(completeCalls, 4);
   await settle({}, ctx);
-  assert.equal(completeCalls, 5);
+  assert.equal(completeCalls, 4);
   assert.equal(
     JSON.stringify(appended.at(-1)?.data).includes("recovered"),
     true,
   );
   await settle({}, ctx);
-  assert.equal(completeCalls, 5);
+  assert.equal(completeCalls, 4);
   assert.deepEqual(notices, [
     "Minimap summary failed; it will retry after the next run",
     "Minimap update failed; it will retry after the next run",
@@ -1170,7 +1223,7 @@ test("lifecycle reconciles on settlement and recovers update failures", async ()
   branch = [...branch, userEntry("b4", "Cancel branch B", "b3")];
   const settlingShutdown = Promise.resolve(settle({}, ctx));
   await Promise.resolve();
-  assert.equal(completeCalls, 6);
+  assert.equal(completeCalls, 5);
   const beforeShutdown = appended.length;
   shutdown({ reason: "quit" }, ctx);
   assert.equal(

@@ -112,14 +112,19 @@ export const sessionEfficiency = (
     (sum, count) => sum + count,
     0,
   );
+  const modelCalls = entries.filter(
+    (entry) => entry.type === "message" && entry.message.role === "assistant",
+  ).length;
+  const attempts = calls + modelCalls;
   const cacheTokens = stats.input + stats.cacheRead;
   const mappedTokens = stats.agentTokens + stats.summaryTokens;
   return {
     elapsedMs:
       Number.isFinite(first) && Number.isFinite(last) ? last - first : 0,
     calls,
+    attempts,
     cacheShare: cacheTokens ? (stats.cacheRead / cacheTokens) * 100 : 0,
-    failureRate: calls ? (stats.errors / calls) * 100 : 0,
+    failureRate: attempts ? (stats.errors / attempts) * 100 : 0,
     mapOverhead: mappedTokens ? (stats.summaryTokens / mappedTokens) * 100 : 0,
   };
 };
@@ -623,7 +628,7 @@ export class MinimapPane implements Component {
       history.push(
         ...wrappedRows(
           " Failure review ",
-          `${review.total}/${efficiency.calls} (${efficiency.failureRate.toFixed(1)}%) · ${review.runs} runs · max streak ×${review.maxStreak} · ${review.recovered} recovered${review.unresolved ? " · 1 unresolved" : ""}`,
+          `${review.total}/${efficiency.attempts} (${efficiency.failureRate.toFixed(1)}%) · ${review.runs} runs · max streak ×${review.maxStreak} · ${review.recovered} recovered${review.unresolved ? " · 1 unresolved" : ""}`,
           (value) => th.fg("muted", value),
           (value) => th.fg("text", value),
         ),
@@ -824,7 +829,6 @@ export class MinimapPane implements Component {
       rangeEnd = {
         tokens: context.tokens,
         percent: context.percent,
-        contextWindow: context.contextWindow,
       };
     const range = this.state.open
       ? contextLabel(

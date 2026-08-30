@@ -9,6 +9,7 @@ interface Scenario {
   expectedGroups: string[][];
   oracle: string;
   forbidden?: RegExp;
+  requiredTitle?: RegExp;
   requiredDecision?: RegExp;
 }
 
@@ -57,12 +58,13 @@ User: Authentication is complete. Now create a deployment readiness checklist as
 Assistant: I created the deployment readiness checklist.`,
   },
   {
-    name: "remove a rejected approach from the canonical title",
+    name: "preserve the accepted outcome after approach rejection",
     sourceIds: ["CURRENT", "NEW"],
     expectedGroups: [["CURRENT", "NEW"]],
-    forbidden: /redis/i,
+    requiredTitle: /process[- ]local/i,
+    forbidden: /\b(?:redis-backed|using redis|with redis)\b/i,
     oracle:
-      "STEP CURRENT+NEW | Complete session caching with accepted process-local storage",
+      "STEP CURRENT+NEW | Complete session caching with process-local storage instead of Redis",
     input: `ORDERED SOURCES:
 CURRENT: Add a Redis-backed session cache
 NEW: activity below
@@ -152,6 +154,11 @@ export function evaluateOutput(scenario: Scenario, output: string): string[] {
     })
   )
     reasons.push("a title is outside the required 6-10 word range");
+  if (
+    scenario.requiredTitle &&
+    !plan.groups.some(({ summary }) => scenario.requiredTitle?.test(summary))
+  )
+    reasons.push(`missing required title text ${scenario.requiredTitle}`);
 
   const expectedDecisionCount = scenario.requiredDecision ? 1 : 0;
   if (plan.decisions.length !== expectedDecisionCount)
@@ -184,6 +191,11 @@ export function parseAttempts(value: string | undefined): number {
   return attempts;
 }
 
+export const modelOutputOptions = (model: string) =>
+  model.startsWith("gpt-5")
+    ? { max_output_tokens: 1_024, reasoning: { effort: "minimal" } }
+    : { max_output_tokens: 256 };
+
 async function runLiveEvaluation(): Promise<void> {
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey)
@@ -207,7 +219,7 @@ async function runLiveEvaluation(): Promise<void> {
           model,
           instructions: SUMMARY_SYSTEM_PROMPT,
           input: scenario.input,
-          max_output_tokens: 256,
+          ...modelOutputOptions(model),
           store: false,
         }),
         signal: AbortSignal.timeout(60_000),

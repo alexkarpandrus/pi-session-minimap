@@ -6,7 +6,7 @@ export const STEP_VERSION = 1;
 
 export type UsageSnapshot = Pick<
   Usage,
-  "input" | "output" | "cacheRead" | "cacheWrite" | "totalTokens"
+  "input" | "output" | "cacheRead" | "totalTokens"
 > & {
   cost: number;
 };
@@ -14,13 +14,10 @@ export type UsageSnapshot = Pick<
 export interface ContextSnapshot {
   tokens: number | null;
   percent: number | null;
-  contextWindow: number;
 }
 
 export interface ContextReset {
   entryIndex: number;
-  beforeTokens: number;
-  afterTokens?: number;
   beforePercent: number | null;
   afterPercent: number | null;
 }
@@ -30,7 +27,6 @@ export interface MinimapStep {
   throughEntryId: string;
   summary: string;
   tools: Record<string, number>;
-  skills: Record<string, number>;
   decisions: string[];
   errors: number;
   usage: UsageSnapshot;
@@ -93,7 +89,6 @@ export const emptyUsage = (): UsageSnapshot => ({
   input: 0,
   output: 0,
   cacheRead: 0,
-  cacheWrite: 0,
   totalTokens: 0,
   cost: 0,
 });
@@ -107,7 +102,6 @@ export const usageSnapshot = (usage?: Usage): UsageSnapshot =>
         input: usage.input,
         output: usage.output,
         cacheRead: usage.cacheRead,
-        cacheWrite: usage.cacheWrite,
         totalTokens: usage.totalTokens,
         cost: usage.cost.total,
       }
@@ -121,7 +115,6 @@ export const addUsage = (
   target.input += usage.input;
   target.output += usage.output;
   target.cacheRead += usage.cacheRead;
-  target.cacheWrite += usage.cacheWrite;
   target.totalTokens += usage.totalTokens;
   target.cost += typeof usage.cost === "number" ? usage.cost : usage.cost.total;
 };
@@ -140,7 +133,6 @@ const isUsageSnapshot = (value: unknown): value is UsageSnapshot =>
   isFiniteNumber(value.input) &&
   isFiniteNumber(value.output) &&
   isFiniteNumber(value.cacheRead) &&
-  isFiniteNumber(value.cacheWrite) &&
   isFiniteNumber(value.totalTokens) &&
   isFiniteNumber(value.cost);
 
@@ -150,8 +142,7 @@ const isCounts = (value: unknown): value is Record<string, number> =>
 const isContextSnapshot = (value: unknown): value is ContextSnapshot =>
   isRecord(value) &&
   (value.tokens === null || isFiniteNumber(value.tokens)) &&
-  (value.percent === null || isFiniteNumber(value.percent)) &&
-  isFiniteNumber(value.contextWindow);
+  (value.percent === null || isFiniteNumber(value.percent));
 
 const isStringArray = (value: unknown): value is string[] =>
   Array.isArray(value) && value.every((item) => typeof item === "string");
@@ -161,7 +152,6 @@ const isOpenStep = (value: unknown): value is OpenStep =>
   typeof value.summary === "string" &&
   typeof value.throughEntryId === "string" &&
   isCounts(value.tools) &&
-  isCounts(value.skills) &&
   isStringArray(value.decisions) &&
   isFiniteNumber(value.errors) &&
   isUsageSnapshot(value.usage) &&
