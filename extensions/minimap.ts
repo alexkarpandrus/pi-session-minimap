@@ -446,7 +446,10 @@ export default function minimapExtension(pi: ExtensionAPI) {
 
   pi.on("message_end", () => requestRender());
   pi.on("session_compact", (_event, _ctx) => requestRender());
-  pi.on("model_select", (_event, _ctx) => requestRender());
+  pi.on("model_select", async (_event, ctx) => {
+    requestRender();
+    if (!state.open && !state.steps.length) await reconcileSemanticMap(ctx);
+  });
 
   pi.on("agent_settled", async (_event, ctx) => {
     let mapped = false;

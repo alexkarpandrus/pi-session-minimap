@@ -940,7 +940,7 @@ test("tail reconciliation merges steps and recomputes their data", async () => {
     [40, 60],
   );
 });
-test("fresh history is reconstructed into ordered semantic steps", async () => {
+test("fresh history reconstructs after the startup model is restored", async () => {
   type Handler = (event: unknown, ctx: ExtensionContext) => unknown;
   const handlers = new Map<string, Handler>();
   const user = (id: string, content: string, parentId: string | null) =>
@@ -1028,7 +1028,12 @@ test("fresh history is reconstructed into ordered semantic steps", async () => {
   } as unknown as ExtensionAPI;
 
   minimapExtension(pi);
-  await handlers.get("session_start")?.({}, ctx);
+  await handlers.get("session_start")?.(
+    {},
+    { ...ctx, model: undefined } as ExtensionContext,
+  );
+  assert.equal(completeCalls, 0);
+  await handlers.get("model_select")?.({}, ctx);
   assert.equal(completeCalls, 1);
   await handlers.get("agent_settled")?.({}, ctx);
 

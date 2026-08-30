@@ -48,7 +48,6 @@ The current goal, session totals, context state, and recent history stay beside 
 
 The dashboard adds a five-column timeline, nested tool tokens, invoked skill totals, failure analysis, and up to three consequential decisions.
 
-
 <p align="center">
   <img src="https://raw.githubusercontent.com/alexkarpandrus/pi-session-minimap/main/assets/expanded.png" alt="Expanded pi session minimap showing semantic history, context resets, cost, tool activity, failure analysis, and decisions">
 </p>

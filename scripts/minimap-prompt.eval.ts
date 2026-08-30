@@ -62,7 +62,8 @@ Assistant: I created the deployment readiness checklist.`,
     sourceIds: ["CURRENT", "NEW"],
     expectedGroups: [["CURRENT", "NEW"]],
     requiredTitle: /process[- ]local/i,
-    forbidden: /\b(?:remote-service|using (?:a )?remote service|with (?:a )?remote service)\b/i,
+    forbidden:
+      /\b(?:remote-service|using (?:a )?remote service|with (?:a )?remote service)\b/i,
     oracle:
       "STEP CURRENT+NEW | Complete session caching with process-local storage instead of remote service",
     input: `ORDERED SOURCES:

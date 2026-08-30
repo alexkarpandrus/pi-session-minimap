@@ -16,10 +16,12 @@ const scenario = (name: string) => {
   return match;
 };
 
-
 test("keeps the runtime prompt domain-neutral", () => {
   assert.doesNotMatch(SUMMARY_SYSTEM_PROMPT, /\b(?:Redis|SQLite)\b/i);
-  assert.match(SUMMARY_SYSTEM_PROMPT, /Use only domain concepts present in the supplied sources/);
+  assert.match(
+    SUMMARY_SYSTEM_PROMPT,
+    /Use only domain concepts present in the supplied sources/,
+  );
 });
 
 for (const item of scenarios) {
