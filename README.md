@@ -79,4 +79,13 @@ npm install
 npm run check
 ```
 
+
+To run the opt-in live prompt evaluation, add `OPENAI_API_KEY` to `.env` and run:
+
+```bash
+npm run eval:prompt
+```
+
+The evaluation makes six paid API calls with `gpt-4o-mini`. Set `OPENAI_MODEL` in `.env` to test another model.
+
 MIT licensed.

@@ -774,7 +774,7 @@ test("tail reconciliation merges steps and recomputes their data", async () => {
     "STEP S1+CURRENT | Built authentication flow\nSTEP NEW | Verified authentication behavior",
   ];
   let contextTokens = 20;
-  let branch: SessionEntry[] = [
+  const branch: SessionEntry[] = [
     user("u1", "Investigate authentication", null),
     assistant("a1", "u1", "read", 10, 2),
   ];
@@ -975,6 +975,8 @@ test("fresh history is reconstructed into ordered semantic steps", async () => {
 
   assert.equal(completeCalls, 2);
   assert.ok(prompts.every((prompt) => prompt.length < 20_000));
+  assert.doesNotMatch(prompts[0] ?? "", /CURRENT DECISIONS:/);
+  assert.match(prompts[1] ?? "", /CURRENT DECISIONS:/);
   assert.match(prompts[0] ?? "", /N8:\s+activity below/);
   assert.doesNotMatch(prompts[0] ?? "", /N9:\s+activity below/);
   assert.match(prompts[1] ?? "", /N2:\s+activity below/);
