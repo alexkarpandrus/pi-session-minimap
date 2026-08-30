@@ -177,9 +177,7 @@ export default function minimapExtension(pi: ExtensionAPI) {
         pendingPersistence = undefined;
         restore(ctx);
         state.current = undefined;
-        runContextStart = undefined;
         requestRender();
-        return true;
       }
     }
     if (!ctx.model) return false;
@@ -345,6 +343,7 @@ export default function minimapExtension(pi: ExtensionAPI) {
       appendPersistedState(ctx, data);
     } catch (error) {
       pendingPersistence = { generation, data };
+      runContextStart = undefined;
       throw error;
     }
     state.steps.splice(settledPrefixCount, recentSteps.length, ...completed);
@@ -448,10 +447,11 @@ export default function minimapExtension(pi: ExtensionAPI) {
   pi.on("session_compact", (_event, _ctx) => requestRender());
   pi.on("model_select", async (_event, ctx) => {
     requestRender();
-    if (!state.open && !state.steps.length) await reconcileSemanticMap(ctx);
+    if (ctx.isIdle()) await reconcileSemanticMap(ctx);
   });
 
   pi.on("agent_settled", async (_event, ctx) => {
+    if (!ctx.isIdle()) return;
     let mapped = false;
     try {
       mapped = await reconcileSemanticMap(ctx);

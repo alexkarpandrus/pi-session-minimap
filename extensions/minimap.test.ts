@@ -831,6 +831,7 @@ test("tail reconciliation merges steps and recomputes their data", async () => {
     mode: "rpc",
     hasUI: false,
     model: { contextWindow: 100 },
+    isIdle: () => true,
     sessionManager: { getBranch: () => branch },
     modelRegistry: {
       complete: async () => ({
@@ -940,7 +941,7 @@ test("tail reconciliation merges steps and recomputes their data", async () => {
     [40, 60],
   );
 });
-test("fresh history reconstructs after the startup model is restored", async () => {
+test("fresh and stale history reconstruct after startup model restore", async () => {
   type Handler = (event: unknown, ctx: ExtensionContext) => unknown;
   const handlers = new Map<string, Handler>();
   const user = (id: string, content: string, parentId: string | null) =>
@@ -966,6 +967,7 @@ test("fresh history reconstructs after the startup model is restored", async () 
     mode: "rpc",
     hasUI: false,
     model: { contextWindow: 100 },
+    isIdle: () => true,
     sessionManager: {
       getBranch: () => branch,
       branch: () => {},
@@ -1035,7 +1037,12 @@ test("fresh history reconstructs after the startup model is restored", async () 
   assert.equal(completeCalls, 0);
   await handlers.get("model_select")?.({}, ctx);
   assert.equal(completeCalls, 1);
-  await handlers.get("agent_settled")?.({}, ctx);
+  await handlers.get("session_start")?.({}, {
+    ...ctx,
+    model: undefined,
+  } as ExtensionContext);
+  assert.equal(completeCalls, 1);
+  await handlers.get("model_select")?.({}, ctx);
 
   assert.equal(completeCalls, 2);
   assert.ok(prompts.every((prompt) => prompt.length < 20_000));
@@ -1093,6 +1100,8 @@ test("lifecycle reconciles on settlement and recovers update failures", async ()
   const appended: Array<{ branch: string; type: string; data: unknown }> = [];
   let branchName = "A";
   let branch = [userEntry("a1", "Work on branch A")];
+  let idle = false;
+  let contextTokens = 10;
   let completeCalls = 0;
   const completionOptions: unknown[] = [];
   let failAppend = false;
@@ -1110,6 +1119,7 @@ test("lifecycle reconciles on settlement and recovers update failures", async ()
     mode: "rpc",
     hasUI: true,
     model: { contextWindow: 100 },
+    isIdle: () => idle,
     sessionManager: {
       getBranch: () => branch,
       branch: (entryId: string) => {
@@ -1125,16 +1135,28 @@ test("lifecycle reconciles on settlement and recovers update failures", async ()
     },
     modelRegistry: {
       complete: async (...args: unknown[]) => {
+        if (!idle) throw new Error("settled handler ran while active");
         completionOptions.push(args[2]);
         completeCalls++;
         if (completeCalls === 1) return firstResponse;
         if (completeCalls === 2) return completion("STEP NEW | Branch B");
         if (completeCalls === 3) return completion("", "error");
-        if (branch.at(-1)?.id === "b4") return shutdownResponse;
+        const lastSourceId = branch
+          .filter((entry) => entry.type !== "custom")
+          .at(-1)?.id;
+        if (lastSourceId === "b5") return shutdownResponse;
+        if (lastSourceId === "b4")
+          return completion(
+            "STEP CURRENT | Branch B recovered\nSTEP NEW | Branch B caught up",
+          );
         return completion("STEP CURRENT+N1+N2 | Branch B recovered");
       },
     },
-    getContextUsage: () => ({ tokens: 10, percent: 10, contextWindow: 100 }),
+    getContextUsage: () => ({
+      tokens: contextTokens,
+      percent: contextTokens,
+      contextWindow: 100,
+    }),
     ui: { notify: (message: string) => notices.push(message) },
   } as unknown as ExtensionContext;
   const pi = {
@@ -1161,11 +1183,17 @@ test("lifecycle reconciles on settlement and recovers update failures", async ()
 
   minimapExtension(pi);
   assert.ok(commands.includes("minimap"));
+  const beforeStart = handlers.get("before_agent_start");
   const settle = handlers.get("agent_settled");
   const switchTree = handlers.get("session_tree");
   const shutdown = handlers.get("session_shutdown");
-  assert.ok(settle && switchTree && shutdown);
+  assert.ok(beforeStart && settle && switchTree && shutdown);
 
+  beforeStart({}, ctx);
+  await settle({}, ctx);
+  assert.equal(completeCalls, 0);
+  assert.equal(appended.length, 0);
+  idle = true;
   const settlingA = Promise.resolve(settle({}, ctx));
   await Promise.resolve();
   assert.equal(completeCalls, 1);
@@ -1209,14 +1237,25 @@ test("lifecycle reconciles on settlement and recovers update failures", async ()
   assert.equal(branch.at(-1)?.id, "b3");
   assert.deepEqual(rollbackIds, ["b3"]);
   assert.equal(completeCalls, 4);
+  branch = [...branch, userEntry("b4", "Continue branch B", "b3")];
+  contextTokens = 20;
+  beforeStart({}, ctx);
+  contextTokens = 30;
   await settle({}, ctx);
-  assert.equal(completeCalls, 4);
+  assert.equal(completeCalls, 5);
   assert.equal(
-    JSON.stringify(appended.at(-1)?.data).includes("recovered"),
+    JSON.stringify(appended.at(-2)?.data).includes("recovered"),
     true,
   );
+  assert.equal(
+    JSON.stringify(appended.at(-1)?.data).includes("caught up"),
+    true,
+  );
+  const recovered = restoreSavedState(branch);
+  assert.equal(recovered.open?.throughEntryId, "b4");
+  assert.equal(recovered.open?.contextStart.tokens, 20);
   await settle({}, ctx);
-  assert.equal(completeCalls, 4);
+  assert.equal(completeCalls, 5);
   assert.deepEqual(notices, [
     "Minimap summary failed; it will retry after the next run",
     "Minimap update failed; it will retry after the next run",
@@ -1225,10 +1264,10 @@ test("lifecycle reconciles on settlement and recovers update failures", async ()
     Object.hasOwn(appended.at(-1)?.data as object, "summaryError"),
     false,
   );
-  branch = [...branch, userEntry("b4", "Cancel branch B", "b3")];
+  branch = [...branch, userEntry("b5", "Cancel branch B", "b4")];
   const settlingShutdown = Promise.resolve(settle({}, ctx));
   await Promise.resolve();
-  assert.equal(completeCalls, 5);
+  assert.equal(completeCalls, 6);
   const beforeShutdown = appended.length;
   shutdown({ reason: "quit" }, ctx);
   assert.equal(
