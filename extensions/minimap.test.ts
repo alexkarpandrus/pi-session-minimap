@@ -1028,10 +1028,10 @@ test("fresh history reconstructs after the startup model is restored", async () 
   } as unknown as ExtensionAPI;
 
   minimapExtension(pi);
-  await handlers.get("session_start")?.(
-    {},
-    { ...ctx, model: undefined } as ExtensionContext,
-  );
+  await handlers.get("session_start")?.({}, {
+    ...ctx,
+    model: undefined,
+  } as ExtensionContext);
   assert.equal(completeCalls, 0);
   await handlers.get("model_select")?.({}, ctx);
   assert.equal(completeCalls, 1);
