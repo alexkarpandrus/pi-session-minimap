@@ -18,7 +18,8 @@
     "url": "https://github.com/alexkarpandrus/pi-session-minimap/issues"
   },
   "files": [
-    "extensions/minimap.ts"
+    "extensions/minimap.ts",
+    "extensions/minimap/*.ts"
   ],
   "scripts": {
     "check": "tsc --noEmit && node --test extensions/minimap.test.ts scripts/minimap-prompt.eval.test.ts",
