@@ -21,8 +21,9 @@
     "extensions/minimap.ts"
   ],
   "scripts": {
-    "check": "tsc --noEmit && node --test extensions/minimap.test.ts",
-    "eval:prompt": "node --env-file=.env scripts/minimap-prompt.eval.ts"
+    "check": "tsc --noEmit && node --test extensions/minimap.test.ts scripts/minimap-prompt.eval.test.ts",
+    "test:prompt-eval": "node --test scripts/minimap-prompt.eval.test.ts",
+    "eval:prompt": "node scripts/minimap-prompt.eval.ts"
   },
   "pi": {
     "extensions": [

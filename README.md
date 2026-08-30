@@ -79,13 +79,17 @@ npm install
 npm run check
 ```
 
+`npm run check` includes model-free prompt-evaluator tests. Known-good outputs must pass, and negative controls must fail for source IDs, grouping, title length, rejected approaches, and decisions.
 
-To run the opt-in live prompt evaluation, add `OPENAI_API_KEY` to `.env` and run:
+To run the opt-in live prompt evaluation, load the API key into the process environment without putting it in shell history:
 
 ```bash
-npm run eval:prompt
+read -rsp "OpenAI API key: " OPENAI_API_KEY && export OPENAI_API_KEY
+echo
+EVAL_ATTEMPTS=3 npm run eval:prompt
+unset OPENAI_API_KEY
 ```
 
-The evaluation makes six paid API calls with `gpt-4o-mini`. Set `OPENAI_MODEL` in `.env` to test another model.
+Each attempt makes six paid API calls with `gpt-4o-mini`. `EVAL_ATTEMPTS` accepts 1-5 and defaults to 1. Set `OPENAI_MODEL` to test another model.
 
 MIT licensed.
