@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { SUMMARY_SYSTEM_PROMPT } from "../extensions/minimap.ts";
+
 import {
   evaluateOutput,
   modelOutputOptions,
@@ -13,6 +15,12 @@ const scenario = (name: string) => {
   assert.ok(match, `missing scenario: ${name}`);
   return match;
 };
+
+
+test("keeps the runtime prompt domain-neutral", () => {
+  assert.doesNotMatch(SUMMARY_SYSTEM_PROMPT, /\b(?:Redis|SQLite)\b/i);
+  assert.match(SUMMARY_SYSTEM_PROMPT, /Use only domain concepts present in the supplied sources/);
+});
 
 for (const item of scenarios) {
   test(`oracle passes: ${item.name}`, () => {
@@ -60,7 +68,7 @@ test("rejects user-directed corrections as decisions", () => {
   );
   const reasons = evaluateOutput(
     item,
-    `${item.oracle}\nDECISION: Use existing process-local cache instead of Redis`,
+    `${item.oracle}\nDECISION: Use existing process-local cache instead of remote service`,
   );
   assert.match(reasons.join("\n"), /expected 0 decisions/);
 });
@@ -79,7 +87,7 @@ test("rejects completion restatements as decisions", () => {
 test("rejects a superseded approach as the accepted outcome", () => {
   const reasons = evaluateOutput(
     scenario("preserve the accepted outcome after approach rejection"),
-    "STEP CURRENT+NEW | Complete Redis-backed session caching implementation successfully",
+    "STEP CURRENT+NEW | Complete remote-service session caching implementation successfully",
   );
   assert.match(reasons.join("\n"), /forbidden text/);
 });
@@ -87,7 +95,7 @@ test("rejects a superseded approach as the accepted outcome", () => {
 test("allows a rejected approach as concise contrast", () => {
   const reasons = evaluateOutput(
     scenario("preserve the accepted outcome after approach rejection"),
-    "STEP CURRENT+NEW | Complete session caching with process-local storage instead of Redis",
+    "STEP CURRENT+NEW | Complete session caching with process-local storage instead of remote service",
   );
   assert.deepEqual(reasons, []);
 });

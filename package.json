@@ -1,13 +1,18 @@
 {
   "name": "pi-session-minimap",
   "version": "0.1.0",
-  "description": "A glanceable semantic session minimap and diagnostics dashboard for pi",
+  "description": "A live semantic map and diagnostics dashboard for long-running pi sessions",
   "type": "module",
   "keywords": [
     "pi-package",
     "pi-extension",
-    "minimap"
+    "coding-agent",
+    "developer-tools",
+    "session",
+    "minimap",
+    "terminal-ui"
   ],
+  "author": "Alexander Karpenko",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -24,18 +29,22 @@
   "scripts": {
     "check": "tsc --noEmit && node --test extensions/minimap.test.ts scripts/minimap-prompt.eval.test.ts",
     "test:prompt-eval": "node --test scripts/minimap-prompt.eval.test.ts",
-    "eval:prompt": "node scripts/minimap-prompt.eval.ts"
+    "eval:prompt": "node scripts/minimap-prompt.eval.ts",
+    "prepublishOnly": "npm run check"
   },
   "pi": {
     "extensions": [
       "./extensions/minimap.ts"
     ],
-    "image": "https://raw.githubusercontent.com/alexkarpandrus/pi-session-minimap/main/assets/compact.png"
+    "image": "https://raw.githubusercontent.com/alexkarpandrus/pi-session-minimap/main/assets/overview.png"
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
     "@earendil-works/pi-coding-agent": "*",
     "@earendil-works/pi-tui": "*"
+  },
+  "engines": {
+    "node": ">=22.19.0"
   },
   "devDependencies": {
     "@earendil-works/pi-ai": "^0.84.3",

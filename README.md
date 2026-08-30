@@ -1,43 +1,23 @@
-# pi-session-minimap
+<p align="center">
+  <img src="https://raw.githubusercontent.com/alexkarpandrus/pi-session-minimap/main/assets/logo.svg" width="112" alt="pi-session-minimap logo">
+</p>
 
-**Stay oriented in long-running [pi](https://pi.dev) sessions.**
+<h1 align="center">pi-session-minimap</h1>
 
-`pi-session-minimap` turns a long agent transcript into a live semantic map. It keeps the current goal, prior goals, context pressure, cost, tool activity, and failures visible without taking focus from the editor.
+<p align="center"><strong>Never lose the plot in a long pi session.</strong></p>
 
-## Screenshots
+<p align="center">
+  <a href="https://www.npmjs.com/package/pi-session-minimap"><img src="https://img.shields.io/npm/v/pi-session-minimap?color=8bd5ca" alt="npm version"></a>
+  <a href="https://github.com/alexkarpandrus/pi-session-minimap/actions/workflows/ci.yml"><img src="https://github.com/alexkarpandrus/pi-session-minimap/actions/workflows/ci.yml/badge.svg" alt="CI status"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-667eea" alt="MIT license"></a>
+  <a href="https://pi.dev/packages"><img src="https://img.shields.io/badge/pi-package-cad3f5" alt="pi package"></a>
+</p>
 
-### Compact view
+<p align="center">
+  <img src="https://raw.githubusercontent.com/alexkarpandrus/pi-session-minimap/main/assets/overview.png" alt="Compact pi session minimap beside the expanded dashboard, showing semantic goals, context pressure, cost, tool activity, failure recovery, decisions, and compaction history">
+</p>
 
-![Compact pi session minimap showing the current goal, context history, session cost, and completed goals](https://raw.githubusercontent.com/alexkarpandrus/pi-session-minimap/main/assets/compact.png)
-
-### Expanded dashboard
-
-![Expanded pi session minimap showing semantic history, context resets, cost, tool activity, failure analysis, and decisions](https://raw.githubusercontent.com/alexkarpandrus/pi-session-minimap/main/assets/expanded.png)
-
-## Why
-
-Long sessions make it hard to answer basic questions:
-
-- What is the agent working on now?
-- Which goals are complete?
-- How close is the context window to overflow?
-- Where did the time, tokens, and cost go?
-- Which failures recovered, and which still need attention?
-
-The minimap answers these questions in a glanceable, non-capturing pane.
-
-## Views
-
-**Compact view** keeps the current semantic goal, session totals, context state, and recent history beside the conversation.
-
-**Expanded view** adds a five-column timeline, nested tool tokens, invoked skill totals, failure analysis, and up to three consequential decisions.
-
-Both views show:
-
-- input/output tokens, cost, and context-window usage
-- agent and minimap-summary token spend
-- tool calls, compactions, overflow, and categorized errors
-- semantic steps that can be renamed or merged as recent work develops
+`pi-session-minimap` turns a long [pi](https://pi.dev) transcript into a live semantic map. See the current goal, completed milestones, context pressure, cost, tool activity, and failures without leaving the conversation.
 
 ## Install
 
@@ -45,11 +25,29 @@ Both views show:
 pi install npm:pi-session-minimap
 ```
 
-Or run it directly from this checkout:
+The compact pane opens automatically in interactive terminals at least 110 columns wide. Use `/minimap` to show or hide it at any time.
 
-```bash
-pi -e ./extensions/minimap.ts
-```
+## What you get
+
+- **Semantic milestones** instead of a wall of turns
+- **Live context pressure** with compaction and overflow markers
+- **Token and cost totals** for the session, agent, and minimap
+- **Tool, skill, and failure diagnostics** with recovered errors separated
+- **Compact and expanded views** that never take terminal focus
+
+## Two views
+
+### Compact
+
+The current goal, session totals, context state, and recent history stay beside the conversation.
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/alexkarpandrus/pi-session-minimap/main/assets/compact.png" width="600" alt="Compact pi session minimap showing the current goal, context history, session cost, and completed goals">
+</p>
+
+### Expanded
+
+The dashboard adds a five-column timeline, nested tool tokens, invoked skill totals, failure analysis, and up to three consequential decisions.
 
 ## Controls
 
@@ -62,26 +60,32 @@ pi -e ./extensions/minimap.ts
 
 `↻` marks compaction. `▲` marks overflow.
 
-The compact pane opens automatically in interactive terminals that are at least 110 columns wide.
+## How semantic history works
 
-## Semantic history
+Related follow-ups, retries, and refinements stay in one milestone. A new milestone starts when the deliverable or phase changes materially.
 
-Related follow-ups, questions, retries, and refinements stay in one milestone. A new step starts when the deliverable or phase changes materially, even within the same project.
+After each settled run, the extension re-reviews the latest five completed milestones, the open milestone, and the new activity. It can rename or merge adjacent milestones while older history stays fixed. Revised metrics are recomputed from their original session entries.
 
-After each settled run, the extension re-reviews the latest five completed steps, the open step, and the new activity. It can rename or merge adjacent steps while older history stays fixed. Revised step metrics are recomputed from their original session entries.
+The extension uses your selected pi model and stores compact revision metadata in the pi session file. It needs no separate account or API key. Its summary calls use tokens from your active model provider; the minimap reports that spend separately.
 
-The extension uses the currently selected model, stores compact revision metadata in the pi session file, and never takes terminal focus.
+## Try from source
+
+```bash
+git clone https://github.com/alexkarpandrus/pi-session-minimap.git
+cd pi-session-minimap
+npm install
+npm run check
+pi -e ./extensions/minimap.ts
+```
 
 ## Development
 
-```bash
-npm install
-npm run check
-```
+`npm run check` runs strict TypeScript checks and model-free prompt-evaluator tests. Known-good outputs must pass, and negative controls must fail for source IDs, grouping, title length, rejected approaches, and decisions.
 
-`npm run check` includes model-free prompt-evaluator tests. Known-good outputs must pass, and negative controls must fail for source IDs, grouping, title length, rejected approaches, and decisions.
+<details>
+<summary>Run the opt-in live prompt evaluation</summary>
 
-To run the opt-in live prompt evaluation, load the API key into the process environment without putting it in shell history:
+Load the API key without putting it in shell history:
 
 ```bash
 read -rsp "OpenAI API key: " OPENAI_API_KEY && export OPENAI_API_KEY
@@ -90,6 +94,10 @@ EVAL_ATTEMPTS=3 npm run eval:prompt
 unset OPENAI_API_KEY
 ```
 
-Each attempt makes six paid API calls with `gpt-4o-mini`. `EVAL_ATTEMPTS` accepts 1-5 and defaults to 1. Set `OPENAI_MODEL` to test another model.
+Each attempt makes six paid API calls with `gpt-4o-mini`. `EVAL_ATTEMPTS` accepts 1–5 and defaults to 1. Set `OPENAI_MODEL` to test another model.
 
-MIT licensed.
+</details>
+
+## License
+
+[MIT](LICENSE) © pi-session-minimap contributors

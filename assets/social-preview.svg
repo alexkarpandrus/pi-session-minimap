@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 640" role="img" aria-labelledby="title description">
+  <title id="title">pi-session-minimap</title>
+  <desc id="description">Stay oriented in long-running pi sessions.</desc>
+  <rect width="1280" height="640" fill="#211f2d"/>
+  <circle cx="1110" cy="80" r="290" fill="#667eea" opacity=".08"/>
+  <circle cx="90" cy="650" r="300" fill="#8bd5ca" opacity=".06"/>
+
+  <g transform="translate(90 112)">
+    <rect width="220" height="220" rx="42" fill="#282536"/>
+    <rect x="12" y="12" width="196" height="196" rx="32" fill="none" stroke="#667eea" stroke-width="6"/>
+    <path d="M58 54v114" stroke="#4f4a64" stroke-width="7" stroke-linecap="round"/>
+    <circle cx="58" cy="58" r="12" fill="#8bd5ca"/>
+    <circle cx="58" cy="110" r="12" fill="#8bd5ca"/>
+    <circle cx="58" cy="163" r="12" fill="#cad3f5"/>
+    <path d="M82 58h67M82 110h54M82 163h75" stroke="#cad3f5" stroke-width="10" stroke-linecap="round"/>
+    <rect x="168" y="48" width="17" height="126" rx="8" fill="#3b374d"/>
+    <rect x="168" y="94" width="17" height="80" rx="8" fill="#8bd5ca"/>
+  </g>
+
+  <text x="360" y="190" fill="#cad3f5" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="64" font-weight="700">pi-session-minimap</text>
+  <text x="363" y="254" fill="#8bd5ca" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="30">Stay oriented in long pi sessions.</text>
+  <text x="363" y="308" fill="#a5adcb" font-family="system-ui, sans-serif" font-size="24">A live semantic map for goals, context, cost, tools, and failures.</text>
+
+  <g transform="translate(90 396)" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">
+    <rect width="1100" height="150" rx="18" fill="#282536" stroke="#4f4a64" stroke-width="2"/>
+    <text x="28" y="42" fill="#8bd5ca" font-size="22" font-weight="700">Session minimap</text>
+    <text x="28" y="78" fill="#cad3f5" font-size="22" font-weight="700">✓ Current · Prepare the release checklist</text>
+    <text x="28" y="113" fill="#a5adcb" font-size="19">Context 34→42% · $2.01 · 13 calls · 1 recovered error</text>
+    <rect x="820" y="40" width="230" height="22" rx="11" fill="#3b374d"/>
+    <rect x="820" y="40" width="97" height="22" rx="11" fill="#8bd5ca"/>
+    <path d="M820 92h48M883 92h91M989 92h61" stroke="#667eea" stroke-width="12" stroke-linecap="round"/>
+  </g>
+</svg>
