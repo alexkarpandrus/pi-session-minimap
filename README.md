@@ -4,20 +4,20 @@
 
 <h1 align="center">pi-session-minimap</h1>
 
-<p align="center"><strong>Never lose the plot in a long pi session.</strong></p>
+<p align="center"><strong>A live minimap for long pi sessions.</strong></p>
 
 <p align="center">
   <a href="https://www.npmjs.com/package/pi-session-minimap"><img src="https://img.shields.io/npm/v/pi-session-minimap?color=8bd5ca" alt="npm version"></a>
   <a href="https://github.com/alexkarpandrus/pi-session-minimap/actions/workflows/ci.yml"><img src="https://github.com/alexkarpandrus/pi-session-minimap/actions/workflows/ci.yml/badge.svg" alt="CI status"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-667eea" alt="MIT license"></a>
-  <a href="https://pi.dev/packages"><img src="https://img.shields.io/badge/pi-package-cad3f5" alt="pi package"></a>
+  <a href="https://pi.dev/packages/pi-session-minimap"><img src="https://img.shields.io/badge/pi-package-cad3f5" alt="pi package"></a>
 </p>
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/alexkarpandrus/pi-session-minimap/main/assets/overview.png" alt="Compact pi session minimap beside the expanded dashboard, showing semantic goals, context pressure, cost, tool activity, failure recovery, decisions, and compaction history">
+  <img src="https://raw.githubusercontent.com/alexkarpandrus/pi-session-minimap/main/assets/demo.gif" alt="pi-session-minimap switching from the compact session pane to the expanded diagnostics dashboard">
 </p>
 
-`pi-session-minimap` turns a long [pi](https://pi.dev) transcript into a live semantic map. See the current goal, completed milestones, context pressure, cost, tool activity, and failures without leaving the conversation.
+`pi-session-minimap` keeps the current task, completed steps, context use, cost, tools, and failures visible beside a long [pi](https://pi.dev) session.
 
 ## Install
 
@@ -25,15 +25,15 @@
 pi install npm:pi-session-minimap
 ```
 
-The compact pane opens automatically in interactive terminals at least 110 columns wide. Use `/minimap` to show or hide it at any time.
+The compact pane opens automatically in interactive terminals at least 110 columns wide. Start a new session or run `/reload` after installing. Use `/minimap` to show or hide it.
 
-## What you get
+## Features
 
-- **Semantic milestones** instead of a wall of turns
-- **Live context pressure** with compaction and overflow markers
-- **Token and cost totals** for the session, agent, and minimap
-- **Tool, skill, and failure diagnostics** with recovered errors separated
-- **Compact and expanded views** that never take terminal focus
+- Groups related turns into semantic milestones
+- Shows context use, compactions, and overflow
+- Reports session, agent, and minimap token costs separately
+- Breaks down tools, skills, failures, and recovered errors
+- Provides compact and expanded views without taking terminal focus
 
 ## Two views
 

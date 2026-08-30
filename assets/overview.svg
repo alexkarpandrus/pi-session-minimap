@@ -15,8 +15,8 @@
   <circle cx="1650" cy="80" r="330" fill="#667eea" opacity=".07"/>
   <circle cx="70" cy="850" r="300" fill="#8bd5ca" opacity=".05"/>
   <rect x="56" y="52" width="10" height="70" rx="5" fill="url(#accent)"/>
-  <text x="88" y="88" fill="#cad3f5" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="44" font-weight="700">One session. Two levels of detail.</text>
-  <text x="90" y="124" fill="#a5adcb" font-family="system-ui, sans-serif" font-size="22">Stay oriented while you work. Expand only when you need the full story.</text>
+  <text x="88" y="88" fill="#cad3f5" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="44" font-weight="700">Compact and expanded views</text>
+  <text x="90" y="124" fill="#a5adcb" font-family="system-ui, sans-serif" font-size="22">Current work and completed steps, beside the conversation.</text>
 
   <g filter="url(#shadow)">
     <rect x="50" y="165" width="610" height="640" rx="24" fill="#282536" stroke="#48435e" stroke-width="2"/>
@@ -27,59 +27,22 @@
   <circle cx="102" cy="200" r="6" fill="#eed49f"/>
   <circle cx="122" cy="200" r="6" fill="#a6da95"/>
   <text x="146" y="207" fill="#8bd5ca" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="22" font-weight="700">COMPACT MINIMAP</text>
-  <text x="626" y="207" text-anchor="end" fill="#6e6a86" font-family="system-ui, sans-serif" font-size="18">always in sight</text>
+  <text x="626" y="207" text-anchor="end" fill="#6e6a86" font-family="system-ui, sans-serif" font-size="18">beside the conversation</text>
 
   <rect x="74" y="230" width="562" height="468" rx="8" fill="#211f2d" stroke="#667eea" stroke-width="2"/>
   <image x="74" y="230" width="562" height="468" xlink:href="compact.png" preserveAspectRatio="xMidYMid meet"/>
-  <text x="78" y="744" fill="#cad3f5" font-family="system-ui, sans-serif" font-size="22" font-weight="650">Know the current goal and context pressure</text>
-  <text x="78" y="775" fill="#a5adcb" font-family="system-ui, sans-serif" font-size="18">without leaving the conversation.</text>
+  <text x="78" y="744" fill="#cad3f5" font-family="system-ui, sans-serif" font-size="22" font-weight="650">Current task, completed steps, context, and cost.</text>
+  <text x="78" y="775" fill="#a5adcb" font-family="system-ui, sans-serif" font-size="18">The pane stays visible while you work.</text>
 
   <circle cx="722" cy="200" r="6" fill="#ed8796"/>
   <circle cx="742" cy="200" r="6" fill="#eed49f"/>
   <circle cx="762" cy="200" r="6" fill="#a6da95"/>
   <text x="786" y="207" fill="#8bd5ca" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="22" font-weight="700">EXPANDED DASHBOARD</text>
-  <text x="1716" y="207" text-anchor="end" fill="#6e6a86" font-family="system-ui, sans-serif" font-size="18">the full session story</text>
+  <text x="1716" y="207" text-anchor="end" fill="#6e6a86" font-family="system-ui, sans-serif" font-size="18">full session detail</text>
 
-  <rect x="714" y="230" width="1012" height="364" rx="8" fill="#211f2d" stroke="#667eea" stroke-width="2"/>
-  <image x="714" y="230" width="1012" height="364" xlink:href="expanded.png" preserveAspectRatio="xMidYMid meet"/>
+  <rect x="714" y="230" width="1012" height="420" rx="8" fill="#211f2d" stroke="#667eea" stroke-width="2"/>
+  <image x="714" y="230" width="1012" height="420" xlink:href="expanded.png" preserveAspectRatio="xMidYMid meet"/>
 
-  <g font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="17">
-    <g transform="translate(714 626)">
-      <rect width="235" height="56" rx="14" fill="#343044"/>
-      <circle cx="25" cy="28" r="7" fill="#8bd5ca"/>
-      <text x="44" y="34" fill="#cad3f5">Semantic goals</text>
-    </g>
-    <g transform="translate(968 626)">
-      <rect width="235" height="56" rx="14" fill="#343044"/>
-      <circle cx="25" cy="28" r="7" fill="#8bd5ca"/>
-      <text x="44" y="34" fill="#cad3f5">Context pressure</text>
-    </g>
-    <g transform="translate(1222 626)">
-      <rect width="235" height="56" rx="14" fill="#343044"/>
-      <circle cx="25" cy="28" r="7" fill="#667eea"/>
-      <text x="44" y="34" fill="#cad3f5">Cost &amp; tokens</text>
-    </g>
-    <g transform="translate(1476 626)">
-      <rect width="250" height="56" rx="14" fill="#343044"/>
-      <circle cx="25" cy="28" r="7" fill="#667eea"/>
-      <text x="44" y="34" fill="#cad3f5">Tools &amp; skills</text>
-    </g>
-    <g transform="translate(714 702)">
-      <rect width="319" height="56" rx="14" fill="#343044"/>
-      <circle cx="25" cy="28" r="7" fill="#ed8796"/>
-      <text x="44" y="34" fill="#cad3f5">Failure recovery</text>
-    </g>
-    <g transform="translate(1052 702)">
-      <rect width="319" height="56" rx="14" fill="#343044"/>
-      <circle cx="25" cy="28" r="7" fill="#eed49f"/>
-      <text x="44" y="34" fill="#cad3f5">Consequential decisions</text>
-    </g>
-    <g transform="translate(1390 702)">
-      <rect width="336" height="56" rx="14" fill="#343044"/>
-      <circle cx="25" cy="28" r="7" fill="#a6da95"/>
-      <text x="44" y="34" fill="#cad3f5">Compaction history</text>
-    </g>
-  </g>
-
-  <text x="900" y="862" text-anchor="middle" fill="#8bd5ca" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="25" font-weight="700">Glance. Expand. Keep moving.</text>
+  <text x="714" y="702" fill="#cad3f5" font-family="system-ui, sans-serif" font-size="22" font-weight="650">Timeline, context, cost, tools, failures, and decisions.</text>
+  <text x="714" y="738" fill="#a5adcb" font-family="system-ui, sans-serif" font-size="18">Open with Ctrl+Shift+M. The conversation remains visible behind the dashboard.</text>
 </svg>
