@@ -113,13 +113,21 @@ type TailSource = Pick<
   "throughEntryId" | "decisions" | "contextStart" | "contextEnd" | "createdAt"
 >;
 
-interface MinimapStateData {
+type MinimapStateData = {
   version: 1;
-  open?: OpenStep;
-  usageOnly?: true;
-  revision?: StepRevision;
   callUsage: UsageSnapshot;
-}
+} & (
+  | {
+      revision: StepRevision;
+      open?: OpenStep;
+      usageOnly?: never;
+    }
+  | {
+      usageOnly: true;
+      open?: never;
+      revision?: never;
+    }
+);
 
 interface SessionStats extends UsageSnapshot {
   tools: Record<string, number>;
@@ -139,8 +147,8 @@ interface CurrentStep {
 
 interface ViewState {
   steps: MinimapStep[];
-  open?: OpenStep;
-  current?: CurrentStep;
+  open: OpenStep | undefined;
+  current: CurrentStep | undefined;
 }
 
 const emptyUsage = (): UsageSnapshot => ({
@@ -186,6 +194,9 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 const isFiniteNumber = (value: unknown): value is number =>
   typeof value === "number" && Number.isFinite(value);
 
+const isNonNegativeSafeInteger = (value: unknown): value is number =>
+  typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+
 const isUsageSnapshot = (value: unknown): value is UsageSnapshot =>
   isRecord(value) &&
   isFiniteNumber(value.input) &&
@@ -221,35 +232,29 @@ const isOpenStep = (value: unknown): value is OpenStep =>
   isFiniteNumber(value.createdAt);
 
 const isMinimapStep = (value: unknown): value is MinimapStep =>
-  isRecord(value) &&
-  value.version === STEP_VERSION &&
-  typeof value.throughEntryId === "string" &&
-  typeof value.summary === "string" &&
-  isCounts(value.tools) &&
-  isCounts(value.skills) &&
-  isStringArray(value.decisions) &&
-  isFiniteNumber(value.errors) &&
-  isUsageSnapshot(value.usage) &&
-  isContextSnapshot(value.contextStart) &&
-  isContextSnapshot(value.contextEnd) &&
-  isFiniteNumber(value.createdAt);
+  isRecord(value) && value.version === STEP_VERSION && isOpenStep(value);
 
 const isStepRevision = (value: unknown): value is StepRevision =>
   isRecord(value) &&
-  Number.isSafeInteger(value.replaceCount) &&
-  (value.replaceCount as number) >= 0 &&
+  isNonNegativeSafeInteger(value.replaceCount) &&
   Array.isArray(value.steps) &&
   value.steps.every(isMinimapStep);
 
-const isMinimapStateData = (value: unknown): value is MinimapStateData =>
-  isRecord(value) &&
-  value.version === STEP_VERSION &&
-  isUsageSnapshot(value.callUsage) &&
-  (value.open === undefined || isOpenStep(value.open)) &&
-  (value.revision === undefined || isStepRevision(value.revision)) &&
-  (value.open !== undefined ||
-    value.usageOnly === true ||
-    value.revision !== undefined);
+const isMinimapStateData = (value: unknown): value is MinimapStateData => {
+  if (
+    !isRecord(value) ||
+    value.version !== STEP_VERSION ||
+    !isUsageSnapshot(value.callUsage)
+  )
+    return false;
+  if (value.usageOnly === true)
+    return value.open === undefined && value.revision === undefined;
+  return (
+    value.usageOnly === undefined &&
+    (value.open === undefined || isOpenStep(value.open)) &&
+    isStepRevision(value.revision)
+  );
+};
 
 const stateFromEntry = (entry: SessionEntry): MinimapStateData | undefined =>
   entry.type === "custom" &&
@@ -326,7 +331,7 @@ export const collectContextResets = (
       }
       if (next?.type !== "message" || next.message.role !== "assistant")
         continue;
-      const message = next.message as AssistantMessage;
+      const message = next.message;
       if (message.stopReason === "aborted" || message.stopReason === "error")
         continue;
       if (message.usage.totalTokens > 0) {
@@ -339,7 +344,7 @@ export const collectContextResets = (
     resets.push({
       entryIndex,
       beforeTokens: entry.tokensBefore,
-      afterTokens,
+      ...(afterTokens === undefined ? {} : { afterTokens }),
       beforePercent:
         contextWindow > 0 ? (entry.tokensBefore / contextWindow) * 100 : null,
       afterPercent:
@@ -373,7 +378,7 @@ export const collectStats = (entries: SessionEntry[]): SessionStats => {
     if (entry.type !== "message") continue;
 
     if (entry.message.role === "assistant") {
-      const message = entry.message as AssistantMessage;
+      const message = entry.message;
       addUsage(stats, message.usage);
       stats.agentTokens += message.usage.totalTokens;
       for (const content of message.content) {
@@ -382,7 +387,7 @@ export const collectStats = (entries: SessionEntry[]): SessionStats => {
         }
       }
     } else if (entry.message.role === "toolResult") {
-      const message = entry.message as ToolResultMessage;
+      const message = entry.message;
       addUsage(stats, message.usage);
       if (message.usage) {
         const tokens = message.usage.totalTokens;
@@ -473,20 +478,12 @@ const reconcileTail = (
   return { completed: reconciled, open };
 };
 
-const textContent = (content: unknown): string => {
-  if (typeof content === "string") return content;
-  if (!Array.isArray(content)) return "";
-  return content
-    .filter(
-      (item): item is { type: "text"; text: string } =>
-        !!item &&
-        typeof item === "object" &&
-        item.type === "text" &&
-        typeof item.text === "string",
-    )
-    .map((item) => item.text)
-    .join("\n");
-};
+const textContent = (
+  content: string | AssistantMessage["content"] | ToolResultMessage["content"],
+): string =>
+  typeof content === "string"
+    ? content
+    : content.flatMap((item) => (item.type === "text" ? [item.text] : [])).join("\n");
 
 export const extractSkills = (
   entries: SessionEntry[],
@@ -552,18 +549,9 @@ const buildTranscript = (entries: SessionEntry[], maxChars: number): string => {
     } else if (message.role === "assistant") {
       const text = textContent(message.content).trim();
       if (text) lines.push(`Assistant: ${text}`);
-      const tools = message.content
-        .filter(
-          (
-            item,
-          ): item is {
-            type: "toolCall";
-            id: string;
-            name: string;
-            arguments: Record<string, unknown>;
-          } => item.type === "toolCall",
-        )
-        .map((item) => item.name);
+      const tools = message.content.flatMap((item) =>
+        item.type === "toolCall" ? [item.name] : [],
+      );
       if (tools.length) lines.push(`Actions: ${tools.join(", ")}`);
       if (message.stopReason === "error" && message.errorMessage)
         lines.push(`Model error: ${message.errorMessage}`);
@@ -1722,7 +1710,7 @@ class MinimapPane implements Component {
 }
 
 export default function minimapExtension(pi: ExtensionAPI) {
-  const state: ViewState = { steps: [] };
+  const state: ViewState = { steps: [], open: undefined, current: undefined };
   let overlay: OverlayHandle | undefined;
   let pane: MinimapPane | undefined;
   let closePane: (() => void) | undefined;
@@ -1755,15 +1743,16 @@ export default function minimapExtension(pi: ExtensionAPI) {
     ctx: ExtensionContext,
     data: MinimapStateData,
   ) => {
-    // pi mutates the SessionManager leaf before a failed disk write returns.
-    const sessionManager = ctx.sessionManager as SessionManager;
+    // The extension API is read-only, but pi uses a SessionManager at runtime and
+    // mutates its leaf before a failed append returns. Roll that mutation back.
+    const mutableSessionManager = ctx.sessionManager as SessionManager;
     const previousLeaf = ctx.sessionManager.getBranch().at(-1)?.id;
     try {
       pi.appendEntry(STATE_ENTRY_TYPE, data);
     } catch (error) {
       if (ctx.sessionManager.getBranch().at(-1)?.id !== previousLeaf) {
-        if (previousLeaf) sessionManager.branch(previousLeaf);
-        else sessionManager.resetLeaf();
+        if (previousLeaf) mutableSessionManager.branch(previousLeaf);
+        else mutableSessionManager.resetLeaf();
       }
       throw error;
     }
@@ -1776,7 +1765,7 @@ export default function minimapExtension(pi: ExtensionAPI) {
   ) => {
     appendPersistedState(ctx, {
       version: STEP_VERSION,
-      open: state.open,
+      ...(state.open ? { open: state.open } : {}),
       revision,
       callUsage,
     });

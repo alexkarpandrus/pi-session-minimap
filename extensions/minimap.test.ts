@@ -144,6 +144,12 @@ test("malformed persisted minimap entries are ignored", () => {
       callUsage: { ...usage(0, 0), cost: 0 },
       revision: { replaceCount: 1, steps: ["corrupt"] },
     }),
+    malformed("mixed-state", "session-minimap-state", {
+      version: 1,
+      callUsage: { ...usage(4, 2), cost: 0 },
+      usageOnly: true,
+      revision: { replaceCount: 0, steps: [] },
+    }),
     malformed("impossible-revision", "session-minimap-state", {
       version: 1,
       callUsage: { ...usage(0, 0), cost: 0 },
