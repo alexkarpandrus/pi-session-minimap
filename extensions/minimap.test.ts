@@ -775,6 +775,91 @@ test("settled semantic threads are not shown as active work", () => {
   assert.equal(minimapStatus(false, false), "idle");
 });
 
+test("session_start reconciles pending activity without blocking", async () => {
+  type Handler = (event: unknown, ctx: ExtensionContext) => unknown;
+  type Completion = {
+    role: "assistant";
+    content: Array<{ type: "text"; text: string }>;
+    api: string;
+    provider: string;
+    model: string;
+    usage: ReturnType<typeof usage>;
+    stopReason: "stop";
+    timestamp: number;
+  };
+  const handlers = new Map<string, Handler>();
+  const branch = [
+    {
+      type: "message",
+      id: "pending",
+      parentId: null,
+      timestamp: "2026-01-01T00:00:00Z",
+      message: { role: "user", content: "Restore pending work", timestamp: 1 },
+    } as SessionEntry,
+  ];
+  let resolveCompletion = (_response: Completion) => {};
+  const completion = new Promise<Completion>((resolve) => {
+    resolveCompletion = resolve;
+  });
+  let resolvePersistence = () => {};
+  const persisted = new Promise<void>((resolve) => {
+    resolvePersistence = resolve;
+  });
+  let completeCalls = 0;
+  const ctx = {
+    mode: "rpc",
+    hasUI: false,
+    model: { contextWindow: 100 },
+    sessionManager: { getBranch: () => branch },
+    modelRegistry: {
+      complete: () => {
+        completeCalls++;
+        return completion;
+      },
+    },
+    getContextUsage: () => ({ tokens: 10, percent: 10, contextWindow: 100 }),
+    ui: { notify: () => {} },
+  } as unknown as ExtensionContext;
+  const pi = {
+    registerCommand: () => {},
+    registerShortcut: () => {},
+    on: (event: string, handler: Handler) => handlers.set(event, handler),
+    appendEntry: (customType: string, data: unknown) => {
+      branch.push({
+        type: "custom",
+        id: "map",
+        parentId: branch.at(-1)?.id ?? null,
+        timestamp: "2026-01-01T00:00:01Z",
+        customType,
+        data,
+      } as SessionEntry);
+      resolvePersistence();
+    },
+  } as unknown as ExtensionAPI;
+
+  minimapExtension(pi);
+  const start = handlers.get("session_start");
+  assert.ok(start);
+  assert.equal(start({}, ctx), undefined);
+  assert.equal(completeCalls, 1);
+
+  resolveCompletion({
+    role: "assistant",
+    content: [{ type: "text", text: "STEP NEW | Restored pending activity" }],
+    api: "test",
+    provider: "test",
+    model: "test",
+    usage: usage(1, 1),
+    stopReason: "stop",
+    timestamp: 1,
+  });
+  await persisted;
+  assert.equal(
+    restoreSavedState(branch).open?.summary,
+    "Restored pending activity",
+  );
+});
+
 test("tail reconciliation merges steps and recomputes their data", async () => {
   type Handler = (event: unknown, ctx: ExtensionContext) => unknown;
   const handlers = new Map<string, Handler>();

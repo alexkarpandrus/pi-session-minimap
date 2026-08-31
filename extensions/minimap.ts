@@ -407,12 +407,12 @@ export default function minimapExtension(pi: ExtensionAPI) {
     },
   });
 
-  pi.on("session_start", async (_event, ctx) => {
+  pi.on("session_start", (_event, ctx) => {
     branchGeneration++;
     restore(ctx);
     openPane(ctx);
     requestRender();
-    await reconcileSemanticMap(ctx);
+    void reconcileSemanticMap(ctx);
   });
 
   pi.on("before_agent_start", (_event, ctx) => {
