@@ -1,6 +1,6 @@
 {
   "name": "pi-session-minimap",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "description": "A live semantic map and diagnostics dashboard for long-running pi sessions",
   "type": "module",
   "keywords": [
