@@ -1046,11 +1046,10 @@ test("fresh and stale history reconstruct after startup model restore", async ()
 
   assert.equal(completeCalls, 2);
   assert.ok(prompts.every((prompt) => prompt.length < 20_000));
-  assert.doesNotMatch(prompts[0] ?? "", /CURRENT DECISIONS:/);
-  assert.match(prompts[1] ?? "", /CURRENT DECISIONS:/);
-  assert.match(prompts[0] ?? "", /N8:\s+activity below/);
-  assert.doesNotMatch(prompts[0] ?? "", /N9:\s+activity below/);
-  assert.match(prompts[1] ?? "", /N2:\s+activity below/);
+  assert.doesNotMatch(prompts.join("\n"), /activity below|NEW ACTIVITY:/);
+  assert.equal(prompts[0]?.match(/^N8:/gm)?.length, 1);
+  assert.doesNotMatch(prompts[0] ?? "", /^N9:/m);
+  assert.equal(prompts[1]?.match(/^N2:/gm)?.length, 1);
   const restored = restoreSavedState(branch);
   assert.deepEqual(
     restored.steps.map((step) => step.summary),

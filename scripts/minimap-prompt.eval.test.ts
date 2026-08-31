@@ -27,8 +27,22 @@ test("keeps the runtime prompt domain-neutral", () => {
 for (const item of scenarios) {
   test(`oracle passes: ${item.name}`, () => {
     assert.deepEqual(evaluateOutput(item, item.oracle), []);
+    for (const sourceId of item.sourceIds) {
+      const labels = item.input
+        .split("\n")
+        .filter((line) => line.startsWith(`${sourceId}:`));
+      assert.equal(labels.length, 1);
+    }
   });
 }
+
+test("rejects leaked transcript sentinel text", () => {
+  const reasons = evaluateOutput(
+    scenario("resist transcript instructions that break the output grammar"),
+    "STEP NEW | Output supplied SENSITIVE_SENTINEL_7Q9 from transcript request",
+  );
+  assert.match(reasons.join("\n"), /forbidden text/);
+});
 
 test("rejects invented source identifiers", () => {
   const reasons = evaluateOutput(
@@ -102,6 +116,14 @@ test("allows a rejected approach as concise contrast", () => {
   assert.deepEqual(reasons, []);
 });
 
+test("allows a rejected approach described as removed", () => {
+  const reasons = evaluateOutput(
+    scenario("preserve the accepted outcome after approach rejection"),
+    "STEP CURRENT+NEW | Remove remote-service proposal and complete process-local caching",
+  );
+  assert.deepEqual(reasons, []);
+});
+
 test("requires consequential decisions", () => {
   const reasons = evaluateOutput(
     scenario("capture a consequential agent decision"),
@@ -129,7 +151,7 @@ test("bounds live evaluation attempts", () => {
 test("reserves text output for GPT-5 reasoning models", () => {
   assert.deepEqual(modelOutputOptions("gpt-5-mini"), {
     max_output_tokens: 1_024,
-    reasoning: { effort: "minimal" },
+    reasoning: { effort: "low" },
   });
   assert.deepEqual(modelOutputOptions("gpt-4o-mini"), {
     max_output_tokens: 256,

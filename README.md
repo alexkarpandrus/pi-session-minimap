@@ -98,7 +98,7 @@ EVAL_ATTEMPTS=3 npm run eval:prompt
 unset OPENAI_API_KEY
 ```
 
-Each attempt makes six paid API calls with `gpt-4o-mini`. `EVAL_ATTEMPTS` accepts 1–5 and defaults to 1. Set `OPENAI_MODEL` to test another model.
+Each attempt makes six paid API calls with `gpt-5-mini` at low reasoning effort. `EVAL_ATTEMPTS` accepts 1–5 and defaults to 1. Set `OPENAI_MODEL` to test another model.
 
 </details>
 

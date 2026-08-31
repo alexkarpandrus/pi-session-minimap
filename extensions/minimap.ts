@@ -220,17 +220,14 @@ export default function minimapExtension(pi: ExtensionAPI) {
         "ORDERED SOURCES:",
         ...recentSteps.map((step, index) => `S${index + 1}: ${step.summary}`),
         ...(openAtStart ? [`CURRENT: ${openAtStart.summary}`] : []),
-        ...newSourceIds.map((sourceId) => `${sourceId}: activity below`),
-        ...(openAtStart
+        ...(openAtStart?.decisions.length
           ? [
-              "",
-              "CURRENT DECISIONS:",
+              "CURRENT DECISIONS (metadata only)",
               ...openAtStart.decisions.map((item) => `- ${item}`),
             ]
           : []),
-        "",
-        "NEW ACTIVITY:",
         ...newSegments.flatMap((segment, index) => [
+          "",
           `${newSourceIds[index]}:`,
           buildTranscript(
             segment,
