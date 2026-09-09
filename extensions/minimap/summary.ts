@@ -108,13 +108,43 @@ export const reconcileTail = (
 export const splitPendingActivity = (
   entries: SessionEntry[],
 ): SessionEntry[][] => {
-  const starts = entries.flatMap((entry, index) =>
+  const userStarts = entries.flatMap((entry, index) =>
     entry.type === "message" &&
     entry.message.role === "user" &&
     !isStandaloneSkillInjection(textContent(entry.message.content))
       ? [index]
       : [],
   );
+  if (!userStarts.length) return [];
+
+  const progressStarts = userStarts.flatMap((start, index) => {
+    const end = userStarts[index + 1] ?? entries.length;
+    const workTurns = entries.flatMap((entry, entryIndex) =>
+      entryIndex >= start &&
+      entryIndex < end &&
+      entry.type === "message" &&
+      entry.message.role === "assistant" &&
+      entry.message.content.some((item) => item.type === "toolCall")
+        ? [entryIndex]
+        : [],
+    );
+    return workTurns.slice(1);
+  });
+  const slots = Math.max(0, MAX_PENDING_SOURCES - userStarts.length);
+  const sampledProgressStarts =
+    progressStarts.length <= slots
+      ? progressStarts
+      : Array.from(
+          { length: slots },
+          (_, index) =>
+            progressStarts[
+              Math.floor(((index + 1) * progressStarts.length) / (slots + 1))
+            ]!,
+        );
+  const starts = [...userStarts, ...sampledProgressStarts].sort(
+    (a, b) => a - b,
+  );
+
   return starts.map((start, index) =>
     entries.slice(index === 0 ? 0 : start, starts[index + 1] ?? entries.length),
   );
@@ -141,6 +171,14 @@ export const buildTranscript = (
       const text = textContent(message.content).trim();
       if (text) lines.push(`User: ${text}`);
     } else if (message.role === "assistant") {
+      const progress = message.content.flatMap((item) =>
+        item.type === "thinking" && !item.redacted
+          ? Array.from(item.thinking.matchAll(/\*\*([^*\n]+)\*\*/g), (match) =>
+              match[1]?.trim(),
+            ).filter((heading): heading is string => Boolean(heading))
+          : [],
+      );
+      if (progress.length) lines.push(`Progress: ${progress.join("; ")}`);
       const text = textContent(message.content).trim();
       if (text) lines.push(`Assistant: ${text}`);
       const tools = message.content.flatMap((item) =>

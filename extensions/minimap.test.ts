@@ -39,6 +39,7 @@ import minimapExtension, {
   trailingFailureStreak,
   wrapStepSummary,
 } from "./minimap.ts";
+import { buildTranscript, splitPendingActivity } from "./minimap/summary.ts";
 
 const usage = (input: number, output: number) => ({
   input,
@@ -232,6 +233,62 @@ test("step labels stay concise without rewriting stored summaries", () => {
   );
   assert.equal(conciseStep("\u001b]0;spoofed\u001b\\Safe title"), "Safe title");
   assert.equal(conciseStep("\u009d0;spoofed\u009cSafe title"), "Safe title");
+});
+
+test("long single-prompt runs become bounded semantic sources", () => {
+  const run: SessionEntry[] = [
+    {
+      type: "message",
+      id: "user-long-run",
+      parentId: null,
+      timestamp: "2026-01-01T00:00:00Z",
+      message: {
+        role: "user",
+        content: "Implement the delivery",
+        timestamp: 1,
+      },
+    } as SessionEntry,
+    ...Array.from(
+      { length: 10 },
+      (_, index) =>
+        ({
+          type: "message",
+          id: `work-${index + 1}`,
+          parentId: index ? `work-${index}` : "user-long-run",
+          timestamp: "2026-01-01T00:00:01Z",
+          message: {
+            role: "assistant",
+            content: [
+              { type: "thinking", thinking: `**Phase ${index + 1} progress**` },
+              {
+                type: "toolCall",
+                id: `call-${index + 1}`,
+                name: "edit",
+                arguments: {},
+              },
+            ],
+            api: "test",
+            provider: "test",
+            model: "test",
+            usage: usage(1, 1),
+            stopReason: "toolUse",
+            timestamp: index + 2,
+          },
+        }) as SessionEntry,
+    ),
+  ];
+
+  const segments = splitPendingActivity(run);
+  assert.equal(segments.length, 8);
+  assert.deepEqual(
+    segments.flatMap((segment) => segment.map((entry) => entry.id)),
+    run.map((entry) => entry.id),
+  );
+  const transcript = segments
+    .map((segment) => buildTranscript(segment, 2_000))
+    .join("\n");
+  assert.match(transcript, /Progress: Phase 1 progress/);
+  assert.match(transcript, /Progress: Phase 10 progress/);
 });
 
 test("tail plans rename and merge adjacent semantic sources", () => {
@@ -1273,7 +1330,7 @@ test("lifecycle reconciles on settlement and recovers update failures", async ()
   const shutdown = handlers.get("session_shutdown");
   assert.ok(beforeStart && settle && switchTree && shutdown);
 
-  beforeStart({}, ctx);
+  beforeStart({ prompt: "Work on branch A" }, ctx);
   await settle({}, ctx);
   assert.equal(completeCalls, 0);
   assert.equal(appended.length, 0);
@@ -1323,7 +1380,7 @@ test("lifecycle reconciles on settlement and recovers update failures", async ()
   assert.equal(completeCalls, 4);
   branch = [...branch, userEntry("b4", "Continue branch B", "b3")];
   contextTokens = 20;
-  beforeStart({}, ctx);
+  beforeStart({ prompt: "Continue branch B" }, ctx);
   contextTokens = 30;
   await settle({}, ctx);
   assert.equal(completeCalls, 5);
@@ -1461,6 +1518,9 @@ test("compact and expanded panes render within their width", async () => {
   const compact = component?.render(72) ?? [];
   assert.ok(compact.length > 0);
   assert.ok(compact.every((line) => visibleWidth(line) <= 72));
+  assert.match(compact.join("\n"), /Repair authentication failure/);
+  assert.match(compact.join("\n"), /Idle/);
+  assert.doesNotMatch(compact.join("\n"), /No completed steps yet/);
 
   shortcuts.get("ctrl+shift+m")?.();
   const expanded = component?.render(96) ?? [];
@@ -1469,4 +1529,14 @@ test("compact and expanded panes render within their width", async () => {
   assert.match(expanded.join("\n"), /Failure review/);
   assert.match(expanded.join("\n"), /Recent decisions/);
   assert.ok(expanded.every((line) => visibleWidth(line) <= 96));
+  assert.match(expanded.join("\n"), /Repair authentication failure/);
+  assert.match(expanded.join("\n"), /Idle/);
+
+  handlers.get("before_agent_start")?.(
+    { prompt: "Fix live minimap labels" },
+    ctx,
+  );
+  const active = component?.render(96) ?? [];
+  assert.match(active.join("\n"), /Fix live minimap labels/);
+  assert.doesNotMatch(active.join("\n"), /Starting semantic step/);
 });
