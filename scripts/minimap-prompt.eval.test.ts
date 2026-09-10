@@ -22,6 +22,14 @@ test("keeps the runtime prompt domain-neutral", () => {
     SUMMARY_SYSTEM_PROMPT,
     /Use only domain concepts present in the supplied sources/,
   );
+  assert.match(
+    SUMMARY_SYSTEM_PROMPT,
+    /user-steered milestone or agent-directed phase/,
+  );
+  assert.match(
+    SUMMARY_SYSTEM_PROMPT,
+    /Never collapse distinct agent-directed phases only because they came from one user prompt/,
+  );
 });
 
 for (const item of scenarios) {

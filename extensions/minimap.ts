@@ -18,7 +18,11 @@ import {
   type TailSource,
   type ViewState,
 } from "./minimap/state.ts";
-import { readableGoal, textContent } from "./minimap/diagnostics.ts";
+import {
+  isStandaloneSkillInjection,
+  readableGoal,
+  textContent,
+} from "./minimap/diagnostics.ts";
 import {
   MAX_PENDING_SOURCES,
   MAX_TRANSCRIPT_CHARS,
@@ -238,14 +242,23 @@ export default function minimapExtension(pi: ExtensionAPI) {
               ...openAtStart.decisions.map((item) => `- ${item}`),
             ]
           : []),
-        ...newSegments.flatMap((segment, index) => [
-          "",
-          `${newSourceIds[index]}:`,
-          buildTranscript(
-            segment,
-            Math.floor(MAX_TRANSCRIPT_CHARS / newSegments.length),
-          ),
-        ]),
+        ...newSegments.flatMap((segment, index) => {
+          const userSteered = segment.some(
+            (entry) =>
+              entry.type === "message" &&
+              entry.message.role === "user" &&
+              !isStandaloneSkillInjection(textContent(entry.message.content)),
+          );
+          return [
+            "",
+            `${newSourceIds[index]}:`,
+            `SOURCE KIND: ${userSteered ? "user-steered run start" : "agent-directed continuation"}`,
+            buildTranscript(
+              segment,
+              Math.floor(MAX_TRANSCRIPT_CHARS / newSegments.length),
+            ),
+          ];
+        }),
       ].join("\n");
       const response = await ctx.modelRegistry.complete(
         ctx.model,
