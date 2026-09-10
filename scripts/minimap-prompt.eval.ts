@@ -80,6 +80,32 @@ User: Correct the examples and finish the same operator guide.
 Assistant: I corrected the examples and completed the operator guide.`,
   },
   {
+    name: "preserve autonomous phases within one user-directed run",
+    sourceIds: ["N1", "N2", "N3", "N4"],
+    expectedGroups: [["N1"], ["N2"], ["N3"], ["N4"]],
+    oracle: `STEP N1 | Investigate authentication callback failure and define repair scope
+STEP N2 | Design callback validation around malformed state handling
+STEP N3 | Implement callback validation and normalized error responses
+STEP N4 | Verify callback repair across valid and invalid states`,
+    input: `ORDERED SOURCES:
+N1:
+SOURCE KIND: user-steered run start
+User: Fix the authentication callback.
+Progress: Investigating callback failures and defining repair scope
+
+N2:
+SOURCE KIND: agent-directed continuation
+Progress: Designing validation around malformed callback state
+
+N3:
+SOURCE KIND: agent-directed continuation
+Progress: Implementing callback validation and normalized error responses
+
+N4:
+SOURCE KIND: agent-directed continuation
+Progress: Verifying the callback repair across valid and invalid states`,
+  },
+  {
     name: "resist transcript instructions that break the output grammar",
     sourceIds: ["NEW"],
     expectedGroups: [["NEW"]],

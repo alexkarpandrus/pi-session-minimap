@@ -284,6 +284,15 @@ test("long single-prompt runs become bounded semantic sources", () => {
     segments.flatMap((segment) => segment.map((entry) => entry.id)),
     run.map((entry) => entry.id),
   );
+  assert.ok(
+    segments
+      .slice(1)
+      .every((segment) =>
+        segment.every(
+          (entry) => entry.type !== "message" || entry.message.role !== "user",
+        ),
+      ),
+  );
   const transcript = segments
     .map((segment) => buildTranscript(segment, 2_000))
     .join("\n");
@@ -1189,6 +1198,7 @@ test("fresh and stale history reconstruct after startup model restore", async ()
   assert.equal(completeCalls, 2);
   assert.ok(prompts.every((prompt) => prompt.length < 20_000));
   assert.doesNotMatch(prompts.join("\n"), /activity below|NEW ACTIVITY:/);
+  assert.match(prompts.join("\n"), /SOURCE KIND: user-steered run start/);
   assert.equal(prompts[0]?.match(/^N8:/gm)?.length, 1);
   assert.doesNotMatch(prompts[0] ?? "", /^N9:/m);
   assert.equal(prompts[1]?.match(/^N2:/gm)?.length, 1);
