@@ -18,7 +18,7 @@ import {
   type TailSource,
   type ViewState,
 } from "./minimap/state.ts";
-import { textContent } from "./minimap/diagnostics.ts";
+import { readableGoal, textContent } from "./minimap/diagnostics.ts";
 import {
   MAX_PENDING_SOURCES,
   MAX_TRANSCRIPT_CHARS,
@@ -182,13 +182,25 @@ export default function minimapExtension(pi: ExtensionAPI) {
     }
     if (!ctx.model) return false;
     const branch = ctx.sessionManager.getBranch();
-    const openAtStart = state.open;
+    let openAtStart = state.open;
     const recentSteps = state.steps.slice(-5);
     const settledPrefixCount = state.steps.length - recentSteps.length;
     const previousThrough =
       openAtStart?.throughEntryId ?? state.steps.at(-1)?.throughEntryId;
-    const pending = entriesAfter(branch, previousThrough);
-    const pendingSegments = splitPendingActivity(pending);
+    let pendingSegments = splitPendingActivity(
+      entriesAfter(branch, previousThrough),
+    );
+    let rebuildingOpen = false;
+    if (!pendingSegments.length && openAtStart) {
+      const openSegments = splitPendingActivity(
+        entriesAfter(branch, state.steps.at(-1)?.throughEntryId),
+      );
+      if (openSegments.length > 1) {
+        pendingSegments = openSegments;
+        openAtStart = undefined;
+        rebuildingOpen = true;
+      }
+    }
     if (!pendingSegments.length) return true;
     const newSegments = pendingSegments.slice(0, MAX_PENDING_SOURCES);
     const newSourceIds = newSegments.map((_segment, index) =>
@@ -294,7 +306,7 @@ export default function minimapExtension(pi: ExtensionAPI) {
     };
     const runStart =
       runContextStart ??
-      openAtStart?.contextEnd ??
+      (rebuildingOpen ? state.open?.contextStart : openAtStart?.contextEnd) ??
       state.steps.at(-1)?.contextEnd ??
       now;
     const createdAt = Date.now();
@@ -305,10 +317,7 @@ export default function minimapExtension(pi: ExtensionAPI) {
         const last = segment.filter((entry) => !stateFromEntry(entry)).at(-1);
         if (!last) throw new Error("minimap new activity source is empty");
         const sourceCreatedAt = Date.parse(
-          segment.find(
-            (entry) =>
-              entry.type === "message" && entry.message.role === "user",
-          )?.timestamp ?? "",
+          segment.find((entry) => entry.type === "message")?.timestamp ?? "",
         );
         const isLast = index === newSegments.length - 1;
         return {
@@ -415,10 +424,13 @@ export default function minimapExtension(pi: ExtensionAPI) {
     void reconcileSemanticMap(ctx);
   });
 
-  pi.on("before_agent_start", (_event, ctx) => {
+  pi.on("before_agent_start", (event, ctx) => {
     runContextStart ??= snapshotContext(ctx);
     state.current = {
-      label: state.open?.summary ?? "Starting semantic step",
+      label:
+        readableGoal(event.prompt) ||
+        state.open?.summary ||
+        "Starting semantic step",
       tools: emptyCounts(),
       errors: 0,
     };

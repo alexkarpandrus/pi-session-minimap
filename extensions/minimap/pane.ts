@@ -405,7 +405,7 @@ export class MinimapPane implements Component {
       entryIndexes.get(this.state.steps.at(-1)?.throughEntryId ?? "") ?? -1;
     const liveEntries = entries.slice(lastBoundary + 1);
     const failureStreak = trailingFailureStreak(liveEntries);
-    const liveSummary = this.state.current?.label ?? this.state.open?.summary;
+    const liveSummary = this.state.current?.label;
     const previousThrough =
       this.state.open?.throughEntryId ??
       this.state.steps.at(-1)?.throughEntryId;
@@ -563,8 +563,12 @@ export class MinimapPane implements Component {
     };
 
     let previousBoundary = -1;
-    for (let index = 0; index < this.state.steps.length; index++) {
-      const step = this.state.steps[index];
+    const settledSteps =
+      !this.state.current && this.state.open
+        ? [...this.state.steps, this.state.open]
+        : this.state.steps;
+    for (let index = 0; index < settledSteps.length; index++) {
+      const step = settledSteps[index];
       if (!step) continue;
       const endBoundary =
         entryIndexes.get(step.throughEntryId) ?? previousBoundary;
@@ -776,8 +780,12 @@ export class MinimapPane implements Component {
     const history: string[] = [];
     const cardStarts: number[] = [];
     let previousBoundary = -1;
-    for (let index = 0; index < this.state.steps.length; index++) {
-      const step = this.state.steps[index];
+    const settledSteps =
+      !this.state.current && this.state.open
+        ? [...this.state.steps, this.state.open]
+        : this.state.steps;
+    for (let index = 0; index < settledSteps.length; index++) {
+      const step = settledSteps[index];
       if (!step) continue;
       cardStarts.push(history.length);
       const prefix = ` ${index + 1}. `;
@@ -842,7 +850,7 @@ export class MinimapPane implements Component {
       Boolean(this.state.current),
       Boolean(this.state.open),
     );
-    const liveSummary = this.state.current?.label ?? this.state.open?.summary;
+    const liveSummary = this.state.current?.label;
     const header = [
       border("╭", "─", "╮"),
       row(` ${th.bold(th.fg("accent", "Session minimap"))}`),
