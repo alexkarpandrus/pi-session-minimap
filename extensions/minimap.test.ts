@@ -135,10 +135,37 @@ test("Jev accepts only confident typed boundary decisions", async () => {
   assert.equal(authorization, "Bearer test-key");
   const body = JSON.parse(requestBody) as {
     model: string;
-    questions: { boundary: { type: string } };
+    questions: {
+      boundary: { type: string; criteria: { refresh?: unknown } };
+    };
   };
   assert.equal(body.model, "jev-latest");
   assert.equal(body.questions.boundary.type, "choice");
+  assert.equal(typeof body.questions.boundary.criteria.refresh, "string");
+});
+
+test("Jev refreshes title-changing corrections", async () => {
+  const fetcher = (async () =>
+    new Response(
+      JSON.stringify({
+        answers: {
+          boundary: { type: "choice", choice: "refresh", confidence: 0.8 },
+        },
+      }),
+    )) as typeof fetch;
+
+  assert.equal(
+    await decideMilestoneBoundary(
+      {
+        currentMilestone: "Add remote-service session cache",
+        newActivity: [
+          "Reject the remote service and use process-local storage instead.",
+        ],
+      },
+      { apiKey: "test-key", fetcher },
+    ),
+    "refresh",
+  );
 });
 
 test("Jev falls back when unavailable or uncertain", async () => {
