@@ -24,6 +24,10 @@ import {
   textContent,
 } from "./minimap/diagnostics.ts";
 import {
+  decideMilestoneBoundary,
+  type MilestoneBoundaryDecision,
+} from "./minimap/jev.ts";
+import {
   MAX_PENDING_SOURCES,
   MAX_TRANSCRIPT_CHARS,
   SUMMARY_SYSTEM_PROMPT,
@@ -232,58 +236,101 @@ export default function minimapExtension(pi: ExtensionAPI) {
     const controller = new AbortController();
     summaryAbort = controller;
     try {
-      const prompt = [
-        "ORDERED SOURCES:",
-        ...recentSteps.map((step, index) => `S${index + 1}: ${step.summary}`),
-        ...(openAtStart ? [`CURRENT: ${openAtStart.summary}`] : []),
-        ...(openAtStart?.decisions.length
-          ? [
-              "CURRENT DECISIONS (metadata only)",
-              ...openAtStart.decisions.map((item) => `- ${item}`),
-            ]
-          : []),
-        ...newSegments.flatMap((segment, index) => {
-          const userSteered = segment.some(
-            (entry) =>
-              entry.type === "message" &&
-              entry.message.role === "user" &&
-              !isStandaloneSkillInjection(textContent(entry.message.content)),
-          );
-          return [
-            "",
-            `${newSourceIds[index]}:`,
-            `SOURCE KIND: ${userSteered ? "user-steered run start" : "agent-directed continuation"}`,
-            buildTranscript(
-              segment,
-              Math.floor(MAX_TRANSCRIPT_CHARS / newSegments.length),
+      const current = openAtStart;
+      let boundaryDecision: MilestoneBoundaryDecision = "uncertain";
+      const apiKey =
+        process.env.PI_MINIMAP_JEV === "1"
+          ? process.env.TYPESAFE_API_KEY
+          : undefined;
+      if (current && !rebuildingOpen && apiKey) {
+        boundaryDecision = await decideMilestoneBoundary(
+          {
+            currentMilestone: current.summary,
+            newActivity: newSegments.map((segment) =>
+              buildTranscript(
+                segment,
+                Math.floor(MAX_TRANSCRIPT_CHARS / newSegments.length),
+              ),
             ),
-          ];
-        }),
-      ].join("\n");
-      const response = await ctx.modelRegistry.complete(
-        ctx.model,
-        {
-          systemPrompt: SUMMARY_SYSTEM_PROMPT,
-          messages: [
+          },
+          {
+            apiKey,
+            signal: AbortSignal.any([
+              controller.signal,
+              AbortSignal.timeout(SUMMARY_TIMEOUT_MS),
+            ]),
+          },
+        );
+      }
+
+      if (boundaryDecision === "merge" && current) {
+        plan = {
+          groups: [
+            ...recentSteps.map((step, index) => ({
+              sources: [`S${index + 1}`],
+              summary: step.summary,
+            })),
             {
-              role: "user",
-              content: [{ type: "text", text: prompt }],
-              timestamp: Date.now(),
+              sources: ["CURRENT", ...newSourceIds],
+              summary: current.summary,
             },
           ],
-        },
-        {
-          cacheRetention: "none",
-          maxTokens: Math.min(2_048, Math.max(256, sourceIds.length * 24)),
-          timeoutMs: SUMMARY_TIMEOUT_MS,
-          signal: controller.signal,
-        },
-      );
-      callUsage = usageSnapshot(response.usage);
-      if (response.stopReason === "error")
-        throw new Error(response.errorMessage || "model error");
-      plan = parseTailPlan(textContent(response.content), sourceIds);
-      if (!plan) throw new Error("invalid minimap tail plan");
+          decisions: [],
+        };
+      } else {
+        const prompt = [
+          "ORDERED SOURCES:",
+          ...recentSteps.map((step, index) => `S${index + 1}: ${step.summary}`),
+          ...(current ? [`CURRENT: ${current.summary}`] : []),
+          ...(current?.decisions.length
+            ? [
+                "CURRENT DECISIONS (metadata only)",
+                ...current.decisions.map((item) => `- ${item}`),
+              ]
+            : []),
+          ...newSegments.flatMap((segment, index) => {
+            const userSteered = segment.some(
+              (entry) =>
+                entry.type === "message" &&
+                entry.message.role === "user" &&
+                !isStandaloneSkillInjection(textContent(entry.message.content)),
+            );
+            return [
+              "",
+              `${newSourceIds[index]}:`,
+              `SOURCE KIND: ${userSteered ? "user-steered run start" : "agent-directed continuation"}`,
+              buildTranscript(
+                segment,
+                Math.floor(MAX_TRANSCRIPT_CHARS / newSegments.length),
+              ),
+            ];
+          }),
+        ].join("\n");
+        const response = await ctx.modelRegistry.complete(
+          ctx.model,
+          {
+            systemPrompt: SUMMARY_SYSTEM_PROMPT,
+            messages: [
+              {
+                role: "user",
+                content: [{ type: "text", text: prompt }],
+                timestamp: Date.now(),
+              },
+            ],
+          },
+          {
+            cacheRetention: "none",
+            maxTokens: Math.min(2_048, Math.max(256, sourceIds.length * 24)),
+            timeoutMs: SUMMARY_TIMEOUT_MS,
+            signal: controller.signal,
+          },
+        );
+        callUsage = usageSnapshot(response.usage);
+        if (response.stopReason === "error")
+          throw new Error(response.errorMessage || "model error");
+        plan = parseTailPlan(textContent(response.content), sourceIds);
+        if (!plan) throw new Error("invalid minimap tail plan");
+      }
     } catch {
       plan = undefined;
     } finally {

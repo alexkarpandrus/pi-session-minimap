@@ -63,7 +63,7 @@ User: Reject the remote service. Use the existing process-local cache instead.
 Assistant: I removed the remote-service proposal and completed the same caching milestone with the existing process-local cache.`,
   },
   {
-    name: "merge adjacent refinements but preserve phase boundaries",
+    name: "merge refinements while preserving distinct outcomes",
     sourceIds: ["S1", "S2", "CURRENT", "NEW"],
     expectedGroups: [
       ["S1", "S2"],
@@ -80,13 +80,11 @@ User: Correct the examples and finish the same operator guide.
 Assistant: I corrected the examples and completed the operator guide.`,
   },
   {
-    name: "preserve autonomous phases within one user-directed run",
+    name: "merge routine phases into one meaningful outcome",
     sourceIds: ["N1", "N2", "N3", "N4"],
-    expectedGroups: [["N1"], ["N2"], ["N3"], ["N4"]],
-    oracle: `STEP N1 | Investigate authentication callback failure and define repair scope
-STEP N2 | Design callback validation around malformed state handling
-STEP N3 | Implement callback validation and normalized error responses
-STEP N4 | Verify callback repair across valid and invalid states`,
+    expectedGroups: [["N1", "N2", "N3", "N4"]],
+    oracle:
+      "STEP N1+N2+N3+N4 | Complete authentication callback validation and verification",
     input: `ORDERED SOURCES:
 N1:
 SOURCE KIND: user-steered run start

@@ -66,11 +66,17 @@ The dashboard adds a five-column timeline, nested tool tokens, invoked skill tot
 
 ## How semantic history works
 
-Related follow-ups, retries, and refinements stay in one milestone. A new milestone starts when the deliverable or phase changes materially.
+Related follow-ups, retries, and routine work phases stay in one milestone. A new milestone starts only for a distinct outcome worth remembering after the surrounding conversation is gone.
 
-After each settled run, the extension re-reviews the latest five completed milestones, the open milestone, and the new activity. It can rename or merge adjacent milestones while older history stays fixed. Revised metrics are recomputed from their original session entries.
+After each settled run, the extension compares the open milestone with new activity. The normal summarizer can rename or merge the latest five completed milestones while older history stays fixed. A confident Jev merge extends the open milestone directly and keeps its title. Revised metrics are recomputed from their original session entries.
 
-The extension uses your selected pi model and stores compact revision metadata in the pi session file. It needs no separate account or API key. Its summary calls use tokens from your active model provider; the minimap reports that spend separately.
+The extension uses your selected pi model and stores compact revision metadata in the pi session file. Its summary calls use tokens from your active model provider; the minimap reports that spend separately.
+
+## Optional Jev boundary gate
+
+Set `PI_MINIMAP_JEV=1` and `TYPESAFE_API_KEY` in the environment before starting pi. Jev then classifies whether new activity merges into the current milestone. A confident merge skips the pi model call. A separate, uncertain, or failed Jev result uses the normal pi model summarizer, which still creates milestone titles and decisions.
+
+Jev requests send the current milestone title and new activity transcript to TypeSafe AI. TypeSafe bills those requests separately, and their usage is not included in minimap totals.
 
 ## Try from source
 
