@@ -40,6 +40,7 @@ import minimapExtension, {
   wrapStepSummary,
 } from "./minimap.ts";
 import { buildTranscript, splitPendingActivity } from "./minimap/summary.ts";
+import { decideMilestoneBoundary } from "./minimap/jev.ts";
 
 const usage = (input: number, output: number) => ({
   input,
@@ -102,6 +103,112 @@ const entries = [
     },
   },
 ] as SessionEntry[];
+
+test("Jev accepts only confident typed boundary decisions", async () => {
+  let requestBody = "";
+  let authorization = "";
+  const fetcher = (async (
+    _input: string | URL | Request,
+    init?: RequestInit,
+  ) => {
+    requestBody = String(init?.body ?? "");
+    authorization = new Headers(init?.headers).get("Authorization") ?? "";
+    return new Response(
+      JSON.stringify({
+        answers: {
+          boundary: { type: "choice", choice: "merge", confidence: 0.8 },
+        },
+      }),
+    );
+  }) as typeof fetch;
+
+  assert.equal(
+    await decideMilestoneBoundary(
+      {
+        currentMilestone: "Implement callback validation",
+        newActivity: ["Verify valid and invalid callback states"],
+      },
+      { apiKey: "test-key", fetcher },
+    ),
+    "merge",
+  );
+  assert.equal(authorization, "Bearer test-key");
+  const body = JSON.parse(requestBody) as {
+    model: string;
+    questions: {
+      boundary: { type: string; criteria: { refresh?: unknown } };
+    };
+  };
+  assert.equal(body.model, "jev-latest");
+  assert.equal(body.questions.boundary.type, "choice");
+  assert.equal(typeof body.questions.boundary.criteria.refresh, "string");
+});
+
+test("Jev refreshes title-changing corrections", async () => {
+  const fetcher = (async () =>
+    new Response(
+      JSON.stringify({
+        answers: {
+          boundary: { type: "choice", choice: "refresh", confidence: 0.8 },
+        },
+      }),
+    )) as typeof fetch;
+
+  assert.equal(
+    await decideMilestoneBoundary(
+      {
+        currentMilestone: "Add remote-service session cache",
+        newActivity: [
+          "Reject the remote service and use process-local storage instead.",
+        ],
+      },
+      { apiKey: "test-key", fetcher },
+    ),
+    "refresh",
+  );
+});
+
+test("Jev falls back when unavailable or uncertain", async () => {
+  const lowConfidence = (async () =>
+    new Response(
+      JSON.stringify({
+        answers: {
+          boundary: { type: "choice", choice: "merge", confidence: 0.59 },
+        },
+      }),
+    )) as typeof fetch;
+  const failed = (async () =>
+    new Response(null, { status: 500 })) as typeof fetch;
+  const state = {
+    currentMilestone: "Fix callback",
+    newActivity: ["Continue fix"],
+  };
+  let callsWithoutKey = 0;
+  const shouldNotRun = (async () => {
+    callsWithoutKey++;
+    return new Response(null, { status: 500 });
+  }) as typeof fetch;
+
+  assert.equal(
+    await decideMilestoneBoundary(state, { fetcher: shouldNotRun }),
+    "uncertain",
+  );
+  assert.equal(callsWithoutKey, 0);
+  assert.equal(
+    await decideMilestoneBoundary(state, {
+      apiKey: "test-key",
+      fetcher: lowConfidence,
+    }),
+    "uncertain",
+  );
+  assert.equal(
+    await decideMilestoneBoundary(state, {
+      apiKey: "test-key",
+      fetcher: failed,
+    }),
+    "uncertain",
+  );
+});
 
 test("collectStats separates agent and minimap usage", () => {
   const stats = collectStats(entries);

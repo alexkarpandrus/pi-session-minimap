@@ -24,11 +24,11 @@ test("keeps the runtime prompt domain-neutral", () => {
   );
   assert.match(
     SUMMARY_SYSTEM_PROMPT,
-    /user-steered milestone or agent-directed phase/,
+    /meaningful outcome worth remembering after conversation context is lost/,
   );
   assert.match(
     SUMMARY_SYSTEM_PROMPT,
-    /Never collapse distinct agent-directed phases only because they came from one user prompt/,
+    /A phase change, tool batch, supporting artifact, or SOURCE KIND change alone never creates a milestone/,
   );
 });
 
@@ -69,6 +69,17 @@ STEP NEW | Complete the remaining authentication callback correction successfull
   assert.match(reasons.join("\n"), /grouping/);
 });
 
+test("rejects routine phase fragmentation", () => {
+  const reasons = evaluateOutput(
+    scenario("merge routine phases into one meaningful outcome"),
+    `STEP N1 | Investigate authentication callback failure and repair scope
+STEP N2 | Design malformed callback state validation behavior
+STEP N3 | Implement callback validation and normalized error responses
+STEP N4 | Verify callback repair across valid and invalid states`,
+  );
+  assert.match(reasons.join("\n"), /grouping/);
+});
+
 test("rejects titles outside the word limit", () => {
   const reasons = evaluateOutput(
     scenario("merge a retry into its existing milestone"),
@@ -98,9 +109,7 @@ test("rejects user-directed corrections as decisions", () => {
 });
 
 test("rejects completion restatements as decisions", () => {
-  const item = scenario(
-    "merge adjacent refinements but preserve phase boundaries",
-  );
+  const item = scenario("merge refinements while preserving distinct outcomes");
   const reasons = evaluateOutput(
     item,
     `${item.oracle}\nDECISION: Accept corrected operator guide examples`,

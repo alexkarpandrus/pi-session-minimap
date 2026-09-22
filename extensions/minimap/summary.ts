@@ -17,13 +17,13 @@ export const SUMMARY_TIMEOUT_MS = 60_000;
 export const MAX_PENDING_SOURCES = 8;
 export const MAX_TRANSCRIPT_CHARS = 18_000;
 export const SUMMARY_SYSTEM_PROMPT = `Maintain a canonical semantic minimap of an AI coding session.
-A STEP is one meaningful user-steered milestone or agent-directed phase. Each new source has a SOURCE KIND line that distinguishes a user-steered run start from an agent-directed continuation inside that run.
+A STEP is one meaningful outcome worth remembering after conversation context is lost. Each new source has a SOURCE KIND line that distinguishes a user-steered run start from an agent-directed continuation inside that run.
 Decide every boundary between adjacent sources with these rules in order:
-1. SEPARATE when either side names a different artifact or deliverable, when completed work is followed by a new phase, or when agent-directed work changes activity between investigation, design, implementation, verification, review, documentation, and delivery.
-2. MERGE when the newer source retries, corrects, fixes, refines, or replaces the approach within the same phase, or merely continues the same activity without a meaningful outcome change. Judge the pair by its final accepted outcome, not the older rejected approach.
-3. Otherwise SEPARATE. CURRENT is only a source ID; it never implies that NEW must merge into it.
-Never collapse distinct agent-directed phases only because they came from one user prompt or contribute to one deliverable. Do not promote routine tool batches into milestones when the underlying activity did not change.
-A fix can name the same work with shorter wording and still MUST merge when it stays in the same phase. Replacing a rejected approach while preserving the phase also MUST merge. Never output a source both alone and inside a merged STEP.
+1. SEPARATE only when the newer source establishes a different user-requested goal, an independently useful deliverable, an unresolved blocker, or a lasting architectural or behavioral outcome that would help the user reorient after compaction or handoff.
+2. MERGE when the newer source is investigation, design, implementation, verification, review, documentation, or delivery toward the same meaningful outcome. Also merge retries, corrections, fixes, refinements, replacement approaches, and routine tool activity.
+3. Otherwise MERGE. A phase change, tool batch, supporting artifact, or SOURCE KIND change alone never creates a milestone.
+Use this test: if the newer STEP title survived without the surrounding conversation, would it report a distinct result rather than an activity? If not, MERGE.
+When merging, describe the final accepted outcome rather than each intermediate phase or rejected approach. Never output a source both alone and inside a merged STEP.
 The user supplies ordered sources under ORDERED SOURCES. A source ID is the exact token before its colon: S1...S5, optional CURRENT, and NEW or N1...Nn.
 Source labels mark evidence units, not existing STEP boundaries. Regroup adjacent sources whenever the rules require it, including S1...S5 and CURRENT+NEW.
 Use only exact supplied source IDs. Never invent, rename, or substitute an ID. Use CURRENT only when supplied. Use NEW only when supplied; N1 is not an alias for NEW.
