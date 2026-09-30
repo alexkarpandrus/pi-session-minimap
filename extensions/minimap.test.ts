@@ -1689,14 +1689,17 @@ test("lifecycle reconciles on settlement and recovers update failures", async ()
   assert.equal(appended.length, beforeShutdown);
 });
 
-test("compact and expanded panes render within their width", async () => {
+test("panes render live activity during thinking and tool execution", async (t) => {
   type Handler = (event: unknown, ctx: ExtensionContext) => unknown;
   const handlers = new Map<string, Handler>();
   const shortcuts = new Map<string, () => void>();
   let component: Component | undefined;
   let hidden = false;
+  let renderRequests = 0;
+  let completeCalls = 0;
+  let appendedEntries = 0;
   const tui = {
-    requestRender: () => {},
+    requestRender: () => { renderRequests++; },
     terminal: { rows: 40 },
   } as unknown as TUI;
   const theme = {
@@ -1770,6 +1773,9 @@ test("compact and expanded panes render within their width", async () => {
   const ctx = {
     mode: "tui",
     hasUI: true,
+    model: { contextWindow: 100 },
+    modelRegistry: { complete: () => { completeCalls++; throw new Error("unexpected model call"); } },
+    isIdle: () => true,
     sessionManager: { getBranch: () => branch },
     getContextUsage: () => ({ tokens: 10, percent: 10, contextWindow: 100 }),
     ui: { custom, notify: () => {} },
@@ -1779,7 +1785,7 @@ test("compact and expanded panes render within their width", async () => {
     registerShortcut: (key: string, options: { handler: () => void }) =>
       shortcuts.set(key, options.handler),
     on: (event: string, handler: Handler) => handlers.set(event, handler),
-    appendEntry: () => {},
+    appendEntry: () => { appendedEntries++; },
   } as unknown as ExtensionAPI;
 
   minimapExtension(pi);
@@ -1801,6 +1807,8 @@ test("compact and expanded panes render within their width", async () => {
   assert.match(expanded.join("\n"), /Repair authentication failure/);
   assert.match(expanded.join("\n"), /Idle/);
 
+  let now = 10_000;
+  t.mock.method(Date, "now", () => now);
   handlers.get("before_agent_start")?.(
     { prompt: "Fix live minimap labels" },
     ctx,
@@ -1808,4 +1816,76 @@ test("compact and expanded panes render within their width", async () => {
   const active = component?.render(96) ?? [];
   assert.match(active.join("\n"), /Fix live minimap labels/);
   assert.doesNotMatch(active.join("\n"), /Starting semantic step/);
+
+  const render = () => component?.render(96).join("\n") ?? "";
+  const stream = (assistantMessageEvent: unknown) =>
+    handlers.get("message_update")?.({ assistantMessageEvent }, ctx);
+  const text = (value: string) => stream({
+    type: "text_delta",
+    contentIndex: 0,
+    partial: { content: [{ type: "text", text: value }] },
+  });
+  assert.equal(handlers.get("message_start")?.({ message: { role: "assistant" } }, ctx), undefined);
+  assert.match(render(), /Live · Generating response/);
+  assert.equal(stream({ type: "thinking_start" }), undefined);
+  assert.match(render(), /Live · Thinking · 0s/);
+  now += 5_000;
+  const previousRenders = renderRequests;
+  stream({ type: "thinking_delta", delta: "PRIVATE_REASONING_SENTINEL" });
+  assert.ok(renderRequests > previousRenders);
+  assert.match(render(), /Live · Thinking · 5s/);
+  assert.doesNotMatch(render(), /PRIVATE_REASONING_SENTINEL/);
+
+  stream({ type: "text_start" });
+  text("Checking session");
+  text("\u001b[31mChecking session data\u001b[0m");
+  assert.match(render(), /Live · Responding/);
+  assert.equal(render().match(/Checking session/g)?.length, 1);
+  assert.doesNotMatch(render(), /\u001b/);
+  text(" ".repeat(320) + "OUTSIDE_PREVIEW_BOUND");
+  assert.doesNotMatch(render(), /OUTSIDE_PREVIEW_BOUND/);
+  text(" ".repeat(319) + "🧪");
+  assert.doesNotMatch(render(), /[\uD800-\uDBFF]/u);
+  text("a".repeat(159) + "🧪");
+  assert.doesNotMatch(render(), /[\uD800-\uDBFF]/u);
+  stream({ type: "text_start" });
+  text("Checking session data" + "x".repeat(100_000));
+  stream({ type: "toolcall_start" });
+  assert.match(render(), /Live · Preparing tool call/);
+  handlers.get("tool_execution_start")?.({ toolName: "read" }, ctx);
+  assert.match(render(), /Live · Running read/);
+  assert.equal(render().match(/Running read/g)?.length, 1);
+  handlers.get("tool_execution_end")?.({ toolName: "read", isError: false }, ctx);
+  assert.match(render(), /Live · Finished read/);
+  assert.equal(render().match(/Finished read/g)?.length, 1);
+  assert.match(render(), /Checking session data/);
+  handlers.get("tool_execution_start")?.({ toolName: "bash" }, ctx);
+  handlers.get("tool_execution_end")?.({ toolName: "bash", isError: true }, ctx);
+  assert.match(render(), /Live · Failed bash/);
+  assert.doesNotMatch(render(), /Checking session data/); // Only three recent activities.
+  assert.ok((component?.render(96) ?? []).every((line) => visibleWidth(line) <= 96));
+
+  shortcuts.get("ctrl+shift+m")?.();
+  const liveCompact = component?.render(60) ?? [];
+  assert.match(liveCompact.join("\n"), /Live · Failed bash/);
+  assert.ok(liveCompact.every((line) => visibleWidth(line) <= 60));
+  handlers.get("message_end")?.({ message: { role: "assistant", stopReason: "aborted" } }, ctx);
+  assert.match(render(), /Live · Aborted/);
+  handlers.get("message_end")?.({ message: { role: "assistant", stopReason: "error" } }, ctx);
+  assert.match(render(), /Live · Response failed/);
+  assert.equal(completeCalls, 0);
+  assert.equal(appendedEntries, 0);
+
+  await handlers.get("session_tree")?.({}, ctx);
+  assert.doesNotMatch(render(), /Live ·|Failed bash/);
+  handlers.get("before_agent_start")?.({ prompt: "Check recovery" }, ctx);
+  assert.match(render(), /Live · Starting/);
+  assert.doesNotMatch(render(), /Failed bash/);
+  stream({ type: "thinking_start" });
+  await handlers.get("agent_settled")?.({}, ctx);
+  assert.doesNotMatch(render(), /Live ·/);
+  stream({ type: "thinking_delta", delta: "PRIVATE_REASONING_SENTINEL" });
+  assert.doesNotMatch(render(), /Live ·|PRIVATE_REASONING_SENTINEL/);
+  assert.equal(completeCalls, 0);
+  assert.equal(appendedEntries, 0);
 });

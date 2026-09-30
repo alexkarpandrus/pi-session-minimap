@@ -340,6 +340,26 @@ export class MinimapPane implements Component {
     this.expanded = expanded;
   }
 
+  private liveRows(width: number): string[] {
+    const current = this.state.current;
+    if (!current?.phase) return [];
+    const { inner, row, wrappedRows } = paneFrame(this.theme, width);
+    const elapsed = elapsedLabel(Math.max(0, Date.now() - current.phase.startedAt));
+    return [
+      ...wrappedRows(
+        " Live · ",
+        `${current.phase.label} · ${elapsed}`,
+        (value) => this.theme.fg("accent", value),
+        (value) => this.theme.fg("text", value),
+      ),
+      ...(current.activity ?? [])
+        .filter((activity) => activity && activity !== current.phase?.label)
+        .map((activity) =>
+          row(`   › ${this.theme.fg("muted", truncateToWidth(activity, inner - 5))}`),
+        ),
+    ];
+  }
+
   scrollBy(lines: number): void {
     const current = scrollWindow(
       this.historyLength,
@@ -501,6 +521,7 @@ export class MinimapPane implements Component {
     } else {
       header.push(row(` ○ ${th.fg("muted", "Idle")}`));
     }
+    header.push(...this.liveRows(width));
     header.push(
       row(
         ` ${th.fg("muted", "Context")} ${th.fg(contextColor, meterBar(percent, 100, 12))} ${th.fg("text", `${percent ?? "?"}% · ${contextTokens}/${contextWindow}`)} · ${th.fg("muted", `${resets.length} resets`)}`,
@@ -886,6 +907,7 @@ export class MinimapPane implements Component {
     } else {
       header.push(row(` ○ ${th.fg("muted", "Idle")}`));
     }
+    header.push(...this.liveRows(width));
     for (const metric of compactMetrics(stats, context?.percent, resets.length))
       header.push(
         ...wrappedRows(

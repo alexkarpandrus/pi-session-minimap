@@ -21,6 +21,7 @@ import {
 import {
   isStandaloneSkillInjection,
   readableGoal,
+  oneLine,
   textContent,
 } from "./minimap/diagnostics.ts";
 import {
@@ -88,6 +89,7 @@ export default function minimapExtension(pi: ExtensionAPI) {
   let branchGeneration = 0;
   let runContextStart: ContextSnapshot | undefined;
   let expanded = false;
+  let streamingActivity = false;
   let paneContext: ExtensionContext | undefined;
   let pendingPersistence:
     | { generation: number; data: MinimapStateData }
@@ -99,6 +101,22 @@ export default function minimapExtension(pi: ExtensionAPI) {
       tokens: usage?.tokens ?? null,
       percent: usage?.percent ?? null,
     };
+  };
+
+  const updateActivity = (phase: string, text?: string, replace = false) => {
+    const current = state.current;
+    if (!current) return;
+    if (current.phase?.label !== phase)
+      current.phase = { label: phase, startedAt: Date.now() };
+    if (text !== undefined) {
+      const activity = (current.activity ??= []);
+      // ponytail: inspect at most 320 source chars; widen for ANSI-heavy prefixes.
+      const preview = oneLine(text.slice(0, 320), 160).replace(/[\uD800-\uDBFF]$/u, "");
+      if (replace && activity.length) activity[activity.length - 1] = preview;
+      else activity.push(preview);
+      current.activity = activity.slice(-3);
+    }
+    requestRender();
   };
 
   const restore = (ctx: ExtensionContext) => {
@@ -228,6 +246,8 @@ export default function minimapExtension(pi: ExtensionAPI) {
         "Updating session map",
       tools: previousCurrent?.tools ?? emptyCounts(),
       errors: previousCurrent?.errors ?? 0,
+      phase: { label: "Updating milestones", startedAt: Date.now() },
+      activity: previousCurrent?.activity ?? [],
     };
     requestRender();
 
@@ -486,6 +506,7 @@ export default function minimapExtension(pi: ExtensionAPI) {
 
   pi.on("before_agent_start", (event, ctx) => {
     runContextStart ??= snapshotContext(ctx);
+    streamingActivity = false;
     state.current = {
       label:
         readableGoal(event.prompt) ||
@@ -493,15 +514,49 @@ export default function minimapExtension(pi: ExtensionAPI) {
         "Starting semantic step",
       tools: emptyCounts(),
       errors: 0,
+      phase: { label: "Starting", startedAt: Date.now() },
+      activity: [],
     };
     requestRender();
+  });
+
+  pi.on("message_start", (event) => {
+    if (event.message.role !== "assistant") return;
+    streamingActivity = false;
+    updateActivity("Generating response");
+  });
+
+  pi.on("message_update", (event) => {
+    const update = event.assistantMessageEvent;
+    switch (update.type) {
+      case "thinking_start":
+      case "thinking_delta":
+        updateActivity("Thinking");
+        break;
+      case "text_start":
+        streamingActivity = false;
+        updateActivity("Responding");
+        break;
+      case "text_delta": {
+        const block = update.partial.content[update.contentIndex];
+        if (block?.type === "text") {
+          updateActivity("Responding", block.text, streamingActivity);
+          streamingActivity = true;
+        }
+        break;
+      }
+      case "toolcall_start":
+        updateActivity("Preparing tool call");
+        break;
+    }
   });
 
   pi.on("tool_execution_start", (event) => {
     if (!state.current) return;
     state.current.tools[event.toolName] =
       (state.current.tools[event.toolName] ?? 0) + 1;
-    requestRender();
+    const activity = `Running ${oneLine(event.toolName, 24)}`;
+    updateActivity(activity, activity);
   });
 
   pi.on("tool_execution_end", (event) => {
@@ -509,10 +564,17 @@ export default function minimapExtension(pi: ExtensionAPI) {
     if (event.isError) {
       state.current.errors++;
     }
-    requestRender();
+    const activity = `${event.isError ? "Failed" : "Finished"} ${oneLine(event.toolName, 24)}`;
+    updateActivity(activity, activity);
   });
 
-  pi.on("message_end", () => requestRender());
+  pi.on("message_end", (event) => {
+    if (event.message.role === "assistant") {
+      if (event.message.stopReason === "aborted") updateActivity("Aborted");
+      else if (event.message.stopReason === "error") updateActivity("Response failed");
+    }
+    requestRender();
+  });
   pi.on("session_compact", (_event, _ctx) => requestRender());
   pi.on("model_select", async (_event, ctx) => {
     requestRender();
