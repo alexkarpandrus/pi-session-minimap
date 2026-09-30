@@ -28,6 +28,16 @@ export const categorizeError = (
   return oneLine(message.toolName, 24) || "tool";
 };
 
+// Nested calls have no result bodies or usage; the parent owns their total usage.
+const toolOutcomes = (message: ToolResultMessage) => [
+  ...(message.nestedCalls?.calls ?? []).map((call) => ({
+    toolName: call.name,
+    content: [{ type: "text" as const, text: call.error ?? "" }],
+    isError: call.status === "unfinished" ? undefined : call.status === "error",
+  })),
+  message,
+];
+
 export const collectContextResets = (
   entries: SessionEntry[],
   contextWindow: number,
@@ -93,6 +103,15 @@ export const collectStats = (entries: SessionEntry[]): SessionStats => {
       stats.summaryTokens += openState.callUsage.totalTokens;
       continue;
     }
+    if (
+      entry.type === "usage" ||
+      entry.type === "compaction" ||
+      entry.type === "branch_summary"
+    ) {
+      addUsage(stats, entry.usage);
+      stats.agentTokens += entry.usage?.totalTokens ?? 0;
+      continue;
+    }
     if (entry.type !== "message") continue;
 
     if (entry.message.role === "assistant") {
@@ -117,9 +136,13 @@ export const collectStats = (entries: SessionEntry[]): SessionStats => {
         stats.toolTokens[message.toolName] =
           (stats.toolTokens[message.toolName] ?? 0) + tokens;
       }
-      if (message.isError) {
+      for (const call of message.nestedCalls?.calls ?? []) {
+        stats.tools[call.name] = (stats.tools[call.name] ?? 0) + 1;
+      }
+      for (const outcome of toolOutcomes(message)) {
+        if (!outcome.isError) continue;
         stats.errors++;
-        const kind = categorizeError(message);
+        const kind = categorizeError(outcome);
         stats.errorKinds[kind] = (stats.errorKinds[kind] ?? 0) + 1;
       }
     }
@@ -159,6 +182,11 @@ export const extractSkills = (
   const count = (name: string) => {
     skills[name] = (skills[name] ?? 0) + 1;
   };
+  const countReadSkill = (name: string, path: unknown) => {
+    if (name !== "read" || typeof path !== "string") return;
+    const match = path.match(/(?:^|\/)skills\/([^/]+)\/SKILL\.md$/);
+    if (match?.[1]) count(match[1]);
+  };
 
   for (const entry of entries) {
     if (entry.type !== "message") continue;
@@ -169,11 +197,12 @@ export const extractSkills = (
       }
     } else if (entry.message.role === "assistant") {
       for (const content of entry.message.content) {
-        if (content.type !== "toolCall" || content.name !== "read") continue;
-        const path = content.arguments.path;
-        if (typeof path !== "string") continue;
-        const match = path.match(/(?:^|\/)skills\/([^/]+)\/SKILL\.md$/);
-        if (match?.[1]) count(match[1]);
+        if (content.type === "toolCall")
+          countReadSkill(content.name, content.arguments.path);
+      }
+    } else if (entry.message.role === "toolResult") {
+      for (const call of entry.message.nestedCalls?.calls ?? []) {
+        countReadSkill(call.name, call.arguments?.path);
       }
     }
   }
@@ -295,17 +324,20 @@ export const failureReview = (
     if (entry.type !== "message") continue;
     const message = entry.message;
     if (message.role === "toolResult") {
-      if (!message.isError) {
-        recover();
-        continue;
+      for (const outcome of toolOutcomes(message)) {
+        if (outcome.isError === undefined) continue;
+        if (!outcome.isError) {
+          recover();
+          continue;
+        }
+        failuresByTool[outcome.toolName] =
+          (failuresByTool[outcome.toolName] ?? 0) + 1;
+        const type = categorizeError(outcome);
+        recordFailure(
+          type,
+          `${oneLine(outcome.toolName, 24)}: ${failurePatternDetail(outcome.content, type)}`,
+        );
       }
-      failuresByTool[message.toolName] =
-        (failuresByTool[message.toolName] ?? 0) + 1;
-      const type = categorizeError(message);
-      recordFailure(
-        type,
-        `${oneLine(message.toolName, 24)}: ${failurePatternDetail(message.content, type)}`,
-      );
     } else if (message.role === "assistant") {
       if (message.stopReason === "error") {
         recordFailure(

@@ -42,6 +42,9 @@ import minimapExtension, {
 import { buildTranscript, splitPendingActivity } from "./minimap/summary.ts";
 import { decideMilestoneBoundary } from "./minimap/jev.ts";
 
+// Lifecycle tests must not use the operator's optional paid Jev gate.
+delete process.env.PI_MINIMAP_JEV;
+
 const usage = (input: number, output: number) => ({
   input,
   output,
@@ -221,6 +224,155 @@ test("collectStats separates agent and minimap usage", () => {
   assert.equal(stats.errors, 1);
   assert.deepEqual({ ...stats.errorKinds }, { read: 1 });
   assert.deepEqual({ ...stats.toolTokens }, { read: 12 });
+});
+
+test("collectStats includes native usage without minimap duplication", () => {
+  const base = { parentId: null, timestamp: "2026-01-01T00:00:00Z" };
+  const nativeEntries: SessionEntry[] = [
+    {
+      ...base,
+      id: "warm",
+      type: "usage",
+      kind: "cache_warm",
+      provider: "test",
+      model: "test",
+      usage: usage(10, 2),
+    },
+    {
+      ...base,
+      id: "unknown",
+      type: "usage",
+      kind: "future_operation",
+      provider: "test",
+      model: "test",
+      usage: usage(20, 4),
+    },
+    {
+      ...base,
+      id: "compact",
+      type: "compaction",
+      summary: "Earlier work",
+      firstKeptEntryId: "compact",
+      tokensBefore: 100,
+      usage: usage(30, 6),
+    },
+    {
+      ...base,
+      id: "branch",
+      type: "branch_summary",
+      summary: "Other branch",
+      fromId: "user",
+      usage: usage(40, 8),
+    },
+    {
+      ...base,
+      id: "unmetered",
+      type: "branch_summary",
+      summary: "No usage",
+      fromId: "user",
+    },
+  ];
+  const stats = collectStats([...entries, ...nativeEntries]);
+  assert.equal(stats.input, 218);
+  assert.equal(stats.output, 46);
+  assert.equal(stats.totalTokens, 264);
+  assert.equal(stats.agentTokens, 252);
+  assert.equal(stats.summaryTokens, 12);
+  assert.ok(Math.abs(stats.cost - 0.063) < 1e-9);
+  assert.deepEqual({ ...stats.tools }, { read: 1 });
+});
+
+test("nested diagnostics count parent usage once", () => {
+  const base = { parentId: null, timestamp: "2026-01-01T00:00:00Z" };
+  const branch: SessionEntry[] = [
+    {
+      ...base,
+      id: "assistant",
+      type: "message",
+      message: {
+        role: "assistant",
+        api: "test",
+        provider: "test",
+        model: "test",
+        content: [
+          { type: "toolCall", id: "outer", name: "codemode", arguments: {} },
+        ],
+        usage: usage(100, 20),
+        stopReason: "toolUse",
+        timestamp: 1,
+      },
+    } as SessionEntry,
+    {
+      ...base,
+      id: "result",
+      type: "message",
+      message: {
+        role: "toolResult",
+        toolCallId: "outer",
+        toolName: "codemode",
+        content: [{ type: "text", text: "Handled nested errors" }],
+        usage: usage(10, 2),
+        isError: false,
+        timestamp: 2,
+        nestedCalls: {
+          complete: false,
+          calls: [
+            {
+              id: "outer/1",
+              name: "read",
+              status: "ok",
+              arguments: { path: "/skills/session-closeout/SKILL.md" },
+            },
+            {
+              id: "outer/2",
+              name: "bash",
+              status: "error",
+              error: "Command exited with code 1",
+            },
+            {
+              id: "outer/3",
+              name: "bash",
+              status: "error",
+              error: "Command exited with code 1",
+            },
+            { id: "outer/4", name: "read", status: "ok", argumentsBytes: 9000 },
+            { id: "outer/5", name: "write", status: "unfinished" },
+          ],
+        },
+      },
+    },
+  ];
+  const stats = collectStats(branch);
+  assert.deepEqual({ ...stats.tools }, { codemode: 1, read: 2, bash: 2, write: 1 });
+  assert.deepEqual({ ...stats.skills }, { "session-closeout": 1 });
+  assert.equal(stats.errors, 2);
+  assert.deepEqual({ ...stats.errorKinds }, { command: 2 });
+  assert.equal(stats.agentTokens, 132);
+  assert.equal(stats.totalTokens, 132);
+  assert.equal(stats.cost, 0.02);
+  assert.deepEqual({ ...stats.toolTokens }, { codemode: 12 });
+  const review = failureReview(branch, stats.tools);
+  assert.equal(review.total, 2);
+  assert.equal(review.recovered, 1);
+  assert.equal(review.unresolved, 0);
+  assert.equal(review.patterns.length, 1);
+  assert.deepEqual(review.byTool, [
+    { name: "bash", failures: 2, calls: 2, rate: 100 },
+  ]);
+
+  const result = branch[1]!;
+  assert.ok(result.type === "message" && result.message.role === "toolResult");
+  result.message.isError = true;
+  result.message.content = [{ type: "text", text: "Error: orchestration failed" }];
+  assert.equal(collectStats(branch).errors, 3);
+  assert.equal(failureReview(branch, stats.tools).unresolved, 1);
+  result.message.nestedCalls!.calls = result.message.nestedCalls!.calls.filter(
+    (call) => call.status !== "ok",
+  );
+  const unfinished = failureReview(branch, collectStats(branch).tools);
+  assert.equal(unfinished.runs, 1);
+  assert.equal(unfinished.recovered, 0);
+  assert.equal(unfinished.maxStreak, 3);
 });
 
 test("model failures appear in diagnostics and recovery analysis", () => {
