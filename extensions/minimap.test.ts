@@ -1842,12 +1842,18 @@ test("panes render live activity during thinking and tool execution", async (t) 
   assert.match(render(), /Live · Responding/);
   assert.equal(render().match(/Checking session/g)?.length, 1);
   assert.doesNotMatch(render(), /\u001b/);
+  text(" ".repeat(320) + "OUTSIDE_PREVIEW_BOUND");
+  assert.doesNotMatch(render(), /OUTSIDE_PREVIEW_BOUND/);
+  stream({ type: "text_start" });
+  text("Checking session data" + "x".repeat(100_000));
   stream({ type: "toolcall_start" });
   assert.match(render(), /Live · Preparing tool call/);
   handlers.get("tool_execution_start")?.({ toolName: "read" }, ctx);
   assert.match(render(), /Live · Running read/);
+  assert.equal(render().match(/Running read/g)?.length, 1);
   handlers.get("tool_execution_end")?.({ toolName: "read", isError: false }, ctx);
   assert.match(render(), /Live · Finished read/);
+  assert.equal(render().match(/Finished read/g)?.length, 1);
   assert.match(render(), /Checking session data/);
   handlers.get("tool_execution_start")?.({ toolName: "bash" }, ctx);
   handlers.get("tool_execution_end")?.({ toolName: "bash", isError: true }, ctx);

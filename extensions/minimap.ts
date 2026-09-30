@@ -110,7 +110,8 @@ export default function minimapExtension(pi: ExtensionAPI) {
       current.phase = { label: phase, startedAt: Date.now() };
     if (text !== undefined) {
       const activity = (current.activity ??= []);
-      const preview = oneLine(text, 160);
+      // ponytail: inspect at most 320 source chars; widen for ANSI-heavy prefixes.
+      const preview = oneLine(text.slice(0, 320), 160);
       if (replace && activity.length) activity[activity.length - 1] = preview;
       else activity.push(preview);
       current.activity = activity.slice(-3);

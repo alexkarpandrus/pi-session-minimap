@@ -352,9 +352,11 @@ export class MinimapPane implements Component {
         (value) => this.theme.fg("accent", value),
         (value) => this.theme.fg("text", value),
       ),
-      ...(current.activity ?? []).map((activity) =>
-        row(`   › ${this.theme.fg("muted", truncateToWidth(activity, inner - 5))}`),
-      ),
+      ...(current.activity ?? [])
+        .filter((activity) => activity && activity !== current.phase?.label)
+        .map((activity) =>
+          row(`   › ${this.theme.fg("muted", truncateToWidth(activity, inner - 5))}`),
+        ),
     ];
   }
 
