@@ -1844,6 +1844,10 @@ test("panes render live activity during thinking and tool execution", async (t) 
   assert.doesNotMatch(render(), /\u001b/);
   text(" ".repeat(320) + "OUTSIDE_PREVIEW_BOUND");
   assert.doesNotMatch(render(), /OUTSIDE_PREVIEW_BOUND/);
+  text(" ".repeat(319) + "🧪");
+  assert.doesNotMatch(render(), /[\uD800-\uDBFF]/u);
+  text("a".repeat(159) + "🧪");
+  assert.doesNotMatch(render(), /[\uD800-\uDBFF]/u);
   stream({ type: "text_start" });
   text("Checking session data" + "x".repeat(100_000));
   stream({ type: "toolcall_start" });
