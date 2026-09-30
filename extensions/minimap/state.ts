@@ -77,6 +77,8 @@ export interface CurrentStep {
   label: string;
   tools: Record<string, number>;
   errors: number;
+  phase?: { label: string; startedAt: number };
+  activity?: string[];
 }
 
 export interface ViewState {

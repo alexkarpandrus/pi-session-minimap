@@ -30,6 +30,7 @@ The compact pane opens automatically in interactive terminals at least 110 colum
 ## Features
 
 - Groups related turns into semantic milestones
+- Updates a live activity trail during thinking, assistant text, and tool execution
 - Shows context use, compactions, and overflow
 - Reports session, agent, and minimap token costs separately
 - Breaks down tools, skills, failures, and recovered errors
@@ -40,6 +41,8 @@ The compact pane opens automatically in interactive terminals at least 110 colum
 ### Compact
 
 The current goal, session totals, context state, and recent history stay beside the conversation.
+
+The live trail shows the current activity and its elapsed time, plus the latest three public assistant updates or tool events. It updates as the agent streams, without extra model calls. Thinking shows status, not private reasoning text. The trail is temporary; semantic history still updates after each settled run.
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/alexkarpandrus/pi-session-minimap/main/assets/compact.png" width="600" alt="Compact pi session minimap showing the current goal, context history, session cost, and completed goals">
