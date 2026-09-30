@@ -39,7 +39,7 @@ import minimapExtension, {
   trailingFailureStreak,
   wrapStepSummary,
 } from "./minimap.ts";
-import { buildTranscript, splitPendingActivity } from "./minimap/summary.ts";
+import { LIVE_DIRECTION_SYSTEM_PROMPT, buildTranscript, splitPendingActivity } from "./minimap/summary.ts";
 import { decideMilestoneBoundary } from "./minimap/jev.ts";
 
 // Lifecycle tests must not use the operator's optional paid Jev gate.
@@ -1888,4 +1888,174 @@ test("panes render live activity during thinking and tool execution", async (t) 
   assert.doesNotMatch(render(), /Live ·|PRIVATE_REASONING_SENTINEL/);
   assert.equal(completeCalls, 0);
   assert.equal(appendedEntries, 0);
+
+  const response = (value: string, stopReason: "stop" | "error" = "stop") => ({
+    role: "assistant" as const,
+    content: [{ type: "text" as const, text: value }],
+    api: "test",
+    provider: "test",
+    model: "test",
+    usage: usage(1, 1),
+    stopReason,
+    timestamp: 1,
+  });
+  const requests: Array<{
+    prompt: string;
+    systemPrompt: string;
+    signal: AbortSignal | undefined;
+    resolve: (value: ReturnType<typeof response>) => void;
+  }> = [];
+  t.mock.method(ctx.modelRegistry, "complete", (...[_model, request, options]: Parameters<ExtensionContext["modelRegistry"]["complete"]>) =>
+    new Promise<ReturnType<typeof response>>((resolve) => {
+      const message = request.messages[0] as { content: Array<{ text: string }> };
+      requests.push({
+        prompt: message.content[0]?.text ?? "",
+        systemPrompt: request.systemPrompt ?? "",
+        signal: options?.signal,
+        resolve,
+      });
+    }),
+  );
+  t.mock.method(pi, "appendEntry", (customType: string, data: unknown) => {
+    appendedEntries++;
+    branch.push({
+      type: "custom",
+      id: `live-map-${appendedEntries}`,
+      parentId: branch.at(-1)?.id ?? null,
+      timestamp: "2026-01-01T00:00:05Z",
+      customType,
+      data,
+    } as SessionEntry);
+  });
+  const settledHistory = restoreSavedState(branch);
+  const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
+  let turn = 0;
+  const addTurn = (value: string, result = "Routine tool result") => {
+    const id = `live-${++turn}`;
+    const message = {
+      ...response(value),
+      stopReason: "toolUse" as const,
+      content: [
+        { type: "thinking" as const, thinking: "**PRIVATE_REASONING_SENTINEL**" },
+        { type: "text" as const, text: value },
+        { type: "toolCall" as const, id, name: "read", arguments: { path: "authentication.ts" } },
+      ],
+    };
+    const toolResult = {
+      role: "toolResult" as const,
+      toolCallId: id,
+      toolName: "read",
+      content: [{ type: "text" as const, text: result }],
+      isError: false,
+      timestamp: 1,
+    };
+    branch.push(
+      { type: "message", id, parentId: branch.at(-1)?.id ?? null, timestamp: "2026-01-01T00:00:06Z", message },
+      { type: "message", id: `${id}-result`, parentId: id, timestamp: "2026-01-01T00:00:07Z", message: toolResult },
+    );
+    handlers.get("tool_execution_start")?.({ toolName: "read" }, ctx);
+    handlers.get("tool_execution_end")?.({ toolName: "read", isError: false }, ctx);
+    const event = { message, toolResults: [toolResult] };
+    assert.equal(handlers.get("turn_end")?.(event, ctx), undefined);
+    return event;
+  };
+  branch.push({
+    type: "message", id: "live-user", parentId: branch.at(-1)?.id ?? null,
+    timestamp: "2026-01-01T00:00:05Z",
+    message: { role: "user", content: "Repair authentication failure", timestamp: 1 },
+  });
+  handlers.get("before_agent_start")?.({ prompt: "Repair authentication failure" }, ctx);
+
+  const routine = addTurn("Checking authentication data");
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0]?.systemPrompt, LIVE_DIRECTION_SYSTEM_PROMPT);
+  assert.match(requests[0]!.prompt, /authentication\.ts/);
+  assert.match(requests[0]!.prompt, /Routine tool result/);
+  assert.doesNotMatch(requests[0]!.prompt, /PRIVATE_REASONING_SENTINEL/);
+  const rendersBeforeCheck = renderRequests;
+  requests[0]!.resolve(response("UNCHANGED"));
+  await flush();
+  assert.equal(renderRequests, rendersBeforeCheck);
+  assert.match(render(), /Repair authentication failure/);
+  assert.deepEqual(restoreSavedState(branch), settledHistory);
+  assert.equal(collectStats(branch).summaryTokens, collectStats(entries).summaryTokens + 2);
+  handlers.get("turn_end")?.(routine, ctx);
+  await flush();
+  assert.equal(requests.length, 1); // Do not recheck the same evidence.
+  stream({ type: "thinking_delta", delta: "PRIVATE_REASONING_SENTINEL" });
+  assert.equal(requests.length, 1); // No per-token model calls.
+
+  addTurn("Authentication is fixed; investigate the separate billing outage", "Billing service is unavailable");
+  addTurn("The billing outage needs an independent queue repair");
+  addTurn("Queue corruption blocks billing recovery");
+  assert.equal(requests.length, 2); // Coalesce turns while the background check runs.
+  requests[1]!.resolve(response("STEP NEW | Investigating independent billing outage after authentication repair"));
+  await flush();
+  assert.equal(requests.length, 3);
+  assert.match(render(), /Investigating independent billing outage/);
+  assert.match(requests[2]!.prompt, /independent queue repair/);
+  assert.match(requests[2]!.prompt, /Queue corruption/);
+  assert.doesNotMatch(requests[2]!.prompt, /Checking authentication data|PRIVATE_REASONING_SENTINEL/);
+  requests[2]!.resolve(response("STEP NEW | Repairing corrupted billing queue to unblock recovery"));
+  await flush();
+  assert.match(render(), /Repairing corrupted billing queue/);
+  assert.match(render(), /Live ·/);
+  shortcuts.get("ctrl+shift+m")?.();
+  assert.match(render(), /Repairing corrupted billing queue/); // Both pane sizes use the provisional title.
+  assert.deepEqual(restoreSavedState(branch), settledHistory);
+
+  addTurn("Routine verification of the queue repair");
+  requests[3]!.resolve(response("not a direction plan"));
+  await flush();
+  assert.match(render(), /Repairing corrupted billing queue/);
+  addTurn("Retry routine queue verification");
+  requests[4]!.resolve(response("", "error"));
+  await flush();
+  assert.match(render(), /Repairing corrupted billing queue/);
+
+  addTurn("A stale change must not replace the next run");
+  const oldRun = requests[5]!;
+  handlers.get("before_agent_start")?.({ prompt: "Verify billing recovery" }, ctx);
+  assert.equal(oldRun.signal?.aborted, true);
+  const entriesBeforeStale = appendedEntries;
+  oldRun.resolve(response("STEP NEW | Stale direction from the previous active run"));
+  await flush();
+  assert.equal(appendedEntries, entriesBeforeStale);
+  assert.match(render(), /Verify billing recovery/);
+  assert.doesNotMatch(render(), /Stale direction/);
+
+  addTurn("Another significant direction before settlement");
+  const unsettled = requests[6]!;
+  const settling = Promise.resolve(handlers.get("agent_settled")?.({}, ctx));
+  assert.equal(unsettled.signal?.aborted, true);
+  unsettled.resolve(response("STEP NEW | Stale direction must not overwrite settled history"));
+  const finalRequest = requests[7]!;
+  assert.notEqual(finalRequest.systemPrompt, LIVE_DIRECTION_SYSTEM_PROMPT);
+  const sourceIds = [...finalRequest.prompt.matchAll(/^(S\d+|CURRENT|NEW|N\d+):/gm)].map((match) => match[1]);
+  finalRequest.resolve(response(`STEP ${sourceIds.join("+")} | Restored authentication and billing after independent queue repair`));
+  await settling;
+  await flush();
+  assert.doesNotMatch(render(), /Live ·|Stale direction/);
+  assert.equal(restoreSavedState(branch).open?.summary, "Restored authentication and billing after independent queue repair");
+
+  handlers.get("before_agent_start")?.({ prompt: "Check final recovery" }, ctx);
+  addTurn("A stale direction from the previous session branch");
+  const treeRequest = requests.at(-1)!;
+  const entriesBeforeTree = appendedEntries;
+  await handlers.get("session_tree")?.({}, { ...ctx, model: undefined } as ExtensionContext);
+  assert.equal(treeRequest.signal?.aborted, true);
+  treeRequest.resolve(response("STEP NEW | Stale direction must not cross the session tree"));
+  await flush();
+  assert.equal(appendedEntries, entriesBeforeTree);
+  assert.doesNotMatch(render(), /Live ·|Stale direction/);
+
+  handlers.get("before_agent_start")?.({ prompt: "Check final recovery" }, ctx);
+  addTurn("A cancelled direction after shutdown");
+  const shutdownRequest = requests.at(-1)!;
+  handlers.get("session_shutdown")?.({}, ctx);
+  assert.equal(shutdownRequest.signal?.aborted, true);
+  const entriesBeforeShutdown = appendedEntries;
+  shutdownRequest.resolve(response("STEP NEW | Cancelled direction must not persist after shutdown"));
+  await flush();
+  assert.equal(appendedEntries, entriesBeforeShutdown);
 });

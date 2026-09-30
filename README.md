@@ -42,7 +42,9 @@ The compact pane opens automatically in interactive terminals at least 110 colum
 
 The current goal, session totals, context state, and recent history stay beside the conversation.
 
-The live trail shows the current activity and its elapsed time, plus the latest three public assistant updates or tool events. It updates as the agent streams, without extra model calls. Thinking shows status, not private reasoning text. The trail is temporary; semantic history still updates after each settled run.
+The live trail shows the current activity and its elapsed time, plus the latest three public assistant updates or tool events. It updates as the agent streams, without extra model calls. Thinking shows status, not private reasoning text.
+
+During an active run, a background check after completed tool turns can refresh the current milestone when public activity shows a significant direction change. Routine progress, retries, and phase changes keep the title stable. The title is provisional; semantic history still settles when the run ends. Checks use the selected pi model, add to minimap token costs, and coalesce new activity while a check is in flight. They do not read private reasoning or run per token.
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/alexkarpandrus/pi-session-minimap/main/assets/compact.png" width="600" alt="Compact pi session minimap showing the current goal, context history, session cost, and completed goals">

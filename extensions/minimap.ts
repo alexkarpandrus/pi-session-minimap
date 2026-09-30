@@ -29,6 +29,7 @@ import {
   type MilestoneBoundaryDecision,
 } from "./minimap/jev.ts";
 import {
+  LIVE_DIRECTION_SYSTEM_PROMPT,
   MAX_PENDING_SOURCES,
   MAX_TRANSCRIPT_CHARS,
   SUMMARY_SYSTEM_PROMPT,
@@ -86,6 +87,9 @@ export default function minimapExtension(pi: ExtensionAPI) {
   let summaryRunning = false;
   let summaryPending = false;
   let summaryAbort: AbortController | undefined;
+  let directionAbort: AbortController | undefined;
+  let directionPending = false;
+  let directionThroughEntryId: string | undefined;
   let branchGeneration = 0;
   let runContextStart: ContextSnapshot | undefined;
   let expanded = false;
@@ -142,6 +146,88 @@ export default function minimapExtension(pi: ExtensionAPI) {
         else mutableSessionManager.resetLeaf();
       }
       throw error;
+    }
+  };
+
+  const cancelDirectionUpdate = () => {
+    directionAbort?.abort();
+    directionAbort = undefined;
+    directionPending = false;
+    directionThroughEntryId = undefined;
+  };
+
+  const updateLiveDirection = async (ctx: ExtensionContext): Promise<void> => {
+    const current = state.current;
+    if (ctx.mode !== "tui" || !ctx.model || !current || summaryRunning) return;
+    if (directionAbort) {
+      directionPending = true;
+      return;
+    }
+    const pending = entriesAfter(
+      ctx.sessionManager.getBranch(), directionThroughEntryId,
+    );
+    const throughEntryId = pending.at(-1)?.id;
+    const transcript = buildTranscript(pending, MAX_TRANSCRIPT_CHARS, "live");
+    if (!transcript) {
+      directionThroughEntryId = throughEntryId ?? directionThroughEntryId;
+      return;
+    }
+    const generation = branchGeneration;
+    const controller = new AbortController();
+    directionAbort = controller;
+    try {
+      const response = await ctx.modelRegistry.complete(
+        ctx.model,
+        {
+          systemPrompt: LIVE_DIRECTION_SYSTEM_PROMPT,
+          messages: [
+            {
+              role: "user",
+              content: [{
+                type: "text",
+                text: `CURRENT MILESTONE: ${current.label}\n\nPUBLIC ACTIVITY:\n${transcript}`,
+              }],
+              timestamp: Date.now(),
+            },
+          ],
+        },
+        {
+          cacheRetention: "none",
+          maxTokens: 256,
+          timeoutMs: SUMMARY_TIMEOUT_MS,
+          signal: controller.signal,
+        },
+      );
+      // Live titles are provisional. Never revise history or overwrite another run.
+      if (
+        controller.signal.aborted || generation !== branchGeneration ||
+        state.current !== current
+      ) return;
+      appendPersistedState(ctx, {
+        version: STEP_VERSION,
+        usageOnly: true,
+        callUsage: usageSnapshot(response.usage),
+      });
+      if (response.stopReason === "error" || response.stopReason === "aborted") return;
+      const text = textContent(response.content).trim();
+      const plan = parseTailPlan(text, ["NEW"]);
+      if (text !== "UNCHANGED" && (!plan || plan.decisions.length)) return;
+      directionThroughEntryId = throughEntryId;
+      const label = plan?.groups[0]?.summary;
+      if (label && label !== current.label) {
+        current.label = label;
+        requestRender();
+      }
+    } catch {
+      // Keep the last title on failure; the next turn or settled run can retry.
+    } finally {
+      if (directionAbort === controller) {
+        directionAbort = undefined;
+        if (directionPending) {
+          directionPending = false;
+          void updateLiveDirection(ctx);
+        }
+      }
     }
   };
 
@@ -498,6 +584,7 @@ export default function minimapExtension(pi: ExtensionAPI) {
 
   pi.on("session_start", (_event, ctx) => {
     branchGeneration++;
+    cancelDirectionUpdate();
     restore(ctx);
     openPane(ctx);
     requestRender();
@@ -505,6 +592,8 @@ export default function minimapExtension(pi: ExtensionAPI) {
   });
 
   pi.on("before_agent_start", (event, ctx) => {
+    cancelDirectionUpdate();
+    directionThroughEntryId = ctx.sessionManager.getBranch().at(-1)?.id;
     runContextStart ??= snapshotContext(ctx);
     streamingActivity = false;
     state.current = {
@@ -575,6 +664,10 @@ export default function minimapExtension(pi: ExtensionAPI) {
     }
     requestRender();
   });
+  pi.on("turn_end", (event, ctx) => {
+    if (event.message.role !== "assistant" || !event.toolResults.length) return;
+    void updateLiveDirection(ctx);
+  });
   pi.on("session_compact", (_event, _ctx) => requestRender());
   pi.on("model_select", async (_event, ctx) => {
     requestRender();
@@ -583,6 +676,7 @@ export default function minimapExtension(pi: ExtensionAPI) {
 
   pi.on("agent_settled", async (_event, ctx) => {
     if (!ctx.isIdle()) return;
+    cancelDirectionUpdate();
     let mapped = false;
     try {
       mapped = await reconcileSemanticMap(ctx);
@@ -595,6 +689,7 @@ export default function minimapExtension(pi: ExtensionAPI) {
 
   pi.on("session_tree", async (_event, ctx) => {
     branchGeneration++;
+    cancelDirectionUpdate();
     summaryAbort?.abort();
     summaryAbort = undefined;
     restore(ctx);
@@ -606,6 +701,7 @@ export default function minimapExtension(pi: ExtensionAPI) {
 
   pi.on("session_shutdown", () => {
     branchGeneration++;
+    cancelDirectionUpdate();
     summaryAbort?.abort();
     summaryAbort = undefined;
     closePane?.();
