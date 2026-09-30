@@ -366,6 +366,13 @@ test("nested diagnostics count parent usage once", () => {
   result.message.content = [{ type: "text", text: "Error: orchestration failed" }];
   assert.equal(collectStats(branch).errors, 3);
   assert.equal(failureReview(branch, stats.tools).unresolved, 1);
+  result.message.nestedCalls!.calls = result.message.nestedCalls!.calls.filter(
+    (call) => call.status !== "ok",
+  );
+  const unfinished = failureReview(branch, collectStats(branch).tools);
+  assert.equal(unfinished.runs, 1);
+  assert.equal(unfinished.recovered, 0);
+  assert.equal(unfinished.maxStreak, 3);
 });
 
 test("model failures appear in diagnostics and recovery analysis", () => {
