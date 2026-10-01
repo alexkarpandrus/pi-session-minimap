@@ -584,10 +584,9 @@ export class MinimapPane implements Component {
     };
 
     let previousBoundary = -1;
-    const settledSteps =
-      !this.state.current && this.state.open
-        ? [...this.state.steps, this.state.open]
-        : this.state.steps;
+    const settledSteps = this.state.open
+      ? [...this.state.steps, this.state.open]
+      : this.state.steps;
     for (let index = 0; index < settledSteps.length; index++) {
       const step = settledSteps[index];
       if (!step) continue;
@@ -801,10 +800,9 @@ export class MinimapPane implements Component {
     const history: string[] = [];
     const cardStarts: number[] = [];
     let previousBoundary = -1;
-    const settledSteps =
-      !this.state.current && this.state.open
-        ? [...this.state.steps, this.state.open]
-        : this.state.steps;
+    const settledSteps = this.state.open
+      ? [...this.state.steps, this.state.open]
+      : this.state.steps;
     for (let index = 0; index < settledSteps.length; index++) {
       const step = settledSteps[index];
       if (!step) continue;

@@ -123,7 +123,11 @@ export const splitPendingActivity = (
       ? [index]
       : [],
   );
-  if (!userStarts.length) return [];
+  if (!userStarts.length) {
+    if (!entries.some((entry) => entry.type === "message" &&
+      (entry.message.role === "assistant" || entry.message.role === "toolResult"))) return [];
+    userStarts.push(0);
+  }
 
   const progressStarts = userStarts.flatMap((start, index) => {
     const end = userStarts[index + 1] ?? entries.length;

@@ -6,6 +6,7 @@ import type {
   SessionEntry,
   Theme,
 } from "@earendil-works/pi-coding-agent";
+import { SessionManager } from "@earendil-works/pi-coding-agent";
 import {
   visibleWidth,
   type Component,
@@ -552,6 +553,11 @@ test("long single-prompt runs become bounded semantic sources", () => {
         ),
       ),
   );
+  assert.deepEqual(
+    splitPendingActivity(run.slice(1)).flatMap((segment) => segment.map((entry) => entry.id)),
+    run.slice(1).map((entry) => entry.id),
+  );
+  assert.deepEqual(splitPendingActivity([entries[3]!]), []);
   const transcript = segments
     .map((segment) => buildTranscript(segment, 2_000))
     .join("\n");
@@ -1121,6 +1127,8 @@ test("session_start reconciles pending activity without blocking", async () => {
       timestamp: "2026-01-01T00:00:00Z",
       message: { role: "user", content: "Restore pending work", timestamp: 1 },
     } as SessionEntry,
+    { ...entries[1], id: "pending-assistant", parentId: "pending",
+      message: { role: "assistant", content: [{ type: "text", text: "Restored pending activity" }], api: "test", provider: "test", model: "test", usage: usage(0, 0), stopReason: "stop", timestamp: 1 } } as SessionEntry,
   ];
   let resolveCompletion = (_response: Completion) => {};
   const completion = new Promise<Completion>((resolve) => {
@@ -1152,13 +1160,13 @@ test("session_start reconciles pending activity without blocking", async () => {
     appendEntry: (customType: string, data: unknown) => {
       branch.push({
         type: "custom",
-        id: "map",
+        id: `map-${branch.length}`,
         parentId: branch.at(-1)?.id ?? null,
         timestamp: "2026-01-01T00:00:01Z",
         customType,
         data,
       } as SessionEntry);
-      resolvePersistence();
+      if ((data as { callUsage: { totalTokens: number } }).callUsage.totalTokens) resolvePersistence();
     },
   } as unknown as ExtensionAPI;
 
@@ -1168,9 +1176,15 @@ test("session_start reconciles pending activity without blocking", async () => {
   assert.equal(start({}, ctx), undefined);
   assert.equal(completeCalls, 1);
 
+  handlers.get("before_agent_start")?.({ prompt: "Steer into billing recovery" }, ctx);
+  const steering = { role: "user" as const, content: "Steer into billing recovery", timestamp: 2 };
+  handlers.get("message_end")?.({ message: steering }, ctx);
+  branch.push({ type: "message", id: "steering", parentId: branch.at(-1)?.id ?? null,
+    timestamp: "2026-01-01T00:00:02Z", message: steering });
+  handlers.get("turn_end")?.({ message: { role: "assistant" }, toolResults: [] }, ctx);
   resolveCompletion({
     role: "assistant",
-    content: [{ type: "text", text: "STEP NEW | Restored pending activity" }],
+    content: [{ type: "text", text: "STEP CURRENT+NEW | Restored pending activity" }],
     api: "test",
     provider: "test",
     model: "test",
@@ -1181,11 +1195,13 @@ test("session_start reconciles pending activity without blocking", async () => {
   await persisted;
   assert.equal(
     restoreSavedState(branch).open?.summary,
-    "Restored pending activity",
+    "Steer into billing recovery",
   );
+  assert.equal(restoreSavedState(branch).steps[0]?.summary, "Restore pending work");
+  assert.equal(collectStats(branch).summaryTokens, 2);
 });
 
-test("tail reconciliation merges steps and recomputes their data", async () => {
+test("tail reconciliation preserves user boundaries and recomputes their data", async () => {
   type Handler = (event: unknown, ctx: ExtensionContext) => unknown;
   const handlers = new Map<string, Handler>();
   const user = (
@@ -1227,9 +1243,9 @@ test("tail reconciliation merges steps and recomputes their data", async () => {
     }) as SessionEntry;
 
   const plans = [
-    "STEP NEW | Investigated authentication behavior\nDECISION: Use native session storage",
-    "STEP CURRENT | Investigated authentication behavior\nSTEP NEW | Implemented authentication flow",
-    "STEP S1+CURRENT | Built authentication flow\nSTEP NEW | Verified authentication behavior",
+    "STEP CURRENT+NEW | Investigated authentication behavior\nDECISION: Use native session storage",
+    "STEP CURRENT+NEW | Implemented authentication flow",
+    "STEP CURRENT+NEW | Verified authentication behavior",
   ];
   let contextTokens = 20;
   const branch: SessionEntry[] = [
@@ -1313,43 +1329,22 @@ test("tail reconciliation merges steps and recomputes their data", async () => {
   await settle({}, ctx);
 
   const restored = restoreSavedState(branch);
-  assert.deepEqual(
-    restored.steps.map((step) => step.summary),
-    ["Built authentication flow"],
-  );
+  assert.deepEqual(restored.steps.map((step) => step.summary), [
+    "Investigated authentication behavior", "Implemented authentication flow",
+  ]);
   assert.equal(restored.open?.summary, "Verified authentication behavior");
   assert.equal(Object.hasOwn(restored.open ?? {}, "version"), false);
-  assert.deepEqual({ ...restored.steps[0]?.tools }, { read: 1, edit: 1 });
-  assert.deepEqual(restored.steps[0]?.usage, {
-    input: 30,
-    output: 5,
-    cacheRead: 0,
-    totalTokens: 35,
-    cost: 0.02,
-  });
-  assert.deepEqual(restored.steps[0]?.decisions, [
-    "Use native session storage",
-  ]);
+  assert.deepEqual(restored.steps.map((step) => ({ ...step.tools })), [{ read: 1 }, { edit: 1 }]);
+  assert.deepEqual(restored.steps.map((step) => step.usage.totalTokens), [12, 23]);
+  assert.deepEqual(restored.steps[0]?.decisions, ["Use native session storage"]);
   assert.deepEqual({ ...restored.open?.tools }, { test: 1 });
   assert.equal(restored.open?.errors, 1);
-  assert.deepEqual(restored.open?.usage, {
-    input: 35,
-    output: 5,
-    cacheRead: 0,
-    totalTokens: 40,
-    cost: 0.02,
-  });
+  assert.equal(restored.open?.usage.totalTokens, 40);
   assert.deepEqual(
-    [
-      restored.steps[0]?.contextStart?.tokens,
-      restored.steps[0]?.contextEnd?.tokens,
-    ],
+    [restored.steps[0]?.contextStart.tokens, restored.steps[0]?.contextEnd.tokens],
     [20, 40],
   );
-  assert.deepEqual(
-    [restored.open?.contextStart.tokens, restored.open?.contextEnd.tokens],
-    [40, 60],
-  );
+  assert.deepEqual([restored.open?.contextStart.tokens, restored.open?.contextEnd.tokens], [60, 60]);
 });
 test("fresh and stale history reconstruct after startup model restore", async () => {
   type Handler = (event: unknown, ctx: ExtensionContext) => unknown;
@@ -1370,6 +1365,8 @@ test("fresh and stale history reconstruct after startup model restore", async ()
       index ? `u${index}` : null,
     );
   });
+  branch.push({ ...entries[1], id: "a10", parentId: "u10",
+    message: { role: "assistant", content: [{ type: "text", text: "Completed final semantic goal" }], api: "test", provider: "test", model: "test", usage: usage(0, 0), stopReason: "stop", timestamp: 1 } } as SessionEntry);
   const prompts: string[] = [];
   let completeCalls = 0;
   let customId = 0;
@@ -1391,23 +1388,7 @@ test("fresh and stale history reconstruct after startup model restore", async ()
         const prompt = request.messages[0]?.content[0]?.text ?? "";
         prompts.push(prompt);
         completeCalls++;
-        const text =
-          completeCalls === 1
-            ? Array.from(
-                { length: 8 },
-                (_value, index) =>
-                  `STEP N${index + 1} | Completed semantic goal ${index + 1}`,
-              ).join("\n")
-            : [
-                "STEP S1 | Completed semantic goal 3",
-                "STEP S2 | Completed semantic goal 4",
-                "STEP S3 | Completed semantic goal 5",
-                "STEP S4 | Completed semantic goal 6",
-                "STEP S5 | Completed semantic goal 7",
-                "STEP CURRENT | Completed semantic goal 8",
-                "STEP N1 | Completed semantic goal 9",
-                "STEP N2 | Completed semantic goal 10",
-              ].join("\n");
+        const text = "STEP CURRENT+NEW | Completed semantic goal 10";
         return {
           role: "assistant" as const,
           content: [{ type: "text" as const, text }],
@@ -1454,19 +1435,17 @@ test("fresh and stale history reconstruct after startup model restore", async ()
   assert.equal(completeCalls, 1);
   await handlers.get("model_select")?.({}, ctx);
 
-  assert.equal(completeCalls, 2);
+  assert.equal(completeCalls, 1);
   assert.ok(prompts.every((prompt) => prompt.length < 20_000));
   assert.doesNotMatch(prompts.join("\n"), /activity below|NEW ACTIVITY:/);
-  assert.match(prompts.join("\n"), /SOURCE KIND: user-steered run start/);
-  assert.equal(prompts[0]?.match(/^N8:/gm)?.length, 1);
-  assert.doesNotMatch(prompts[0] ?? "", /^N9:/m);
-  assert.equal(prompts[1]?.match(/^N2:/gm)?.length, 1);
+  assert.match(prompts[0] ?? "", /SOURCE KIND: agent-directed continuation/);
+  assert.doesNotMatch(prompts[0] ?? "", /^S\d+:/m);
   const restored = restoreSavedState(branch);
   assert.deepEqual(
     restored.steps.map((step) => step.summary),
     Array.from(
       { length: 9 },
-      (_value, index) => `Completed semantic goal ${index + 1}`,
+      (_value, index) => readableGoal(`Goal ${index + 1} ${"x".repeat(5_000)}`),
     ),
   );
   assert.equal(restored.open?.summary, "Completed semantic goal 10");
@@ -1474,7 +1453,7 @@ test("fresh and stale history reconstruct after startup model restore", async ()
     restored.steps.map((step) => step.throughEntryId),
     Array.from({ length: 9 }, (_value, index) => `u${index + 1}`),
   );
-  assert.equal(restored.open?.throughEntryId, "u10");
+  assert.equal(restored.open?.throughEntryId, "a10");
 });
 
 test("lifecycle reconciles on settlement and recovers update failures", async () => {
@@ -1498,7 +1477,7 @@ test("lifecycle reconciles on settlement and recovers update failures", async ()
     model: "test",
     usage: usage(1, 1),
     stopReason,
-    errorMessage: stopReason === "error" ? "provider failed" : undefined,
+    ...(stopReason === "error" ? { errorMessage: "provider failed" } : {}),
     timestamp: 1,
   });
   type Handler = (event: unknown, ctx: ExtensionContext) => unknown;
@@ -1549,17 +1528,17 @@ test("lifecycle reconciles on settlement and recovers update failures", async ()
         completionOptions.push(args[2]);
         completeCalls++;
         if (completeCalls === 1) return firstResponse;
-        if (completeCalls === 2) return completion("STEP NEW | Branch B");
+        if (completeCalls === 2) return completion("STEP CURRENT+NEW | Branch B");
         if (completeCalls === 3) return completion("", "error");
         const lastSourceId = branch
-          .filter((entry) => entry.type !== "custom")
+          .filter((entry) => entry.type === "message" && entry.message.role === "user")
           .at(-1)?.id;
         if (lastSourceId === "b5") return shutdownResponse;
         if (lastSourceId === "b4")
           return completion(
-            "STEP CURRENT | Branch B recovered\nSTEP NEW | Branch B caught up",
+            "STEP CURRENT+NEW | Branch B caught up",
           );
-        return completion("STEP CURRENT+N1+N2 | Branch B recovered");
+        return completion("STEP CURRENT+NEW | Branch B recovered");
       },
     },
     getContextUsage: () => ({
@@ -1583,7 +1562,7 @@ test("lifecycle reconciles on settlement and recovers update failures", async ()
         data,
       } as SessionEntry;
       branch.push(entry);
-      if (failAppend) {
+      if (failAppend && (data as { callUsage: { totalTokens: number } }).callUsage.totalTokens) {
         failAppend = false;
         throw new Error("persistence failed");
       }
@@ -1594,10 +1573,22 @@ test("lifecycle reconciles on settlement and recovers update failures", async ()
   minimapExtension(pi);
   assert.ok(commands.includes("minimap"));
   const beforeStart = handlers.get("before_agent_start");
-  const settle = handlers.get("agent_settled");
-  const switchTree = handlers.get("session_tree");
+  const addAssistant = () => {
+    const last = branch.at(-1);
+    if (last?.type !== "message" || last.message.role !== "user") return;
+    branch.push({ ...last, id: `${last.id}-assistant`, parentId: last.id,
+      message: completion("Finished branch work") });
+  };
+  const settle = (event: unknown, context: ExtensionContext) => {
+    if (idle) addAssistant();
+    return handlers.get("agent_settled")?.(event, context);
+  };
+  const switchTree = (event: unknown, context: ExtensionContext) => {
+    addAssistant();
+    return handlers.get("session_tree")?.(event, context);
+  };
   const shutdown = handlers.get("session_shutdown");
-  assert.ok(beforeStart && settle && switchTree && shutdown);
+  assert.ok(beforeStart && handlers.has("agent_settled") && handlers.has("session_tree") && shutdown);
 
   beforeStart({ prompt: "Work on branch A" }, ctx);
   await settle({}, ctx);
@@ -1630,8 +1621,10 @@ test("lifecycle reconciles on settlement and recovers update failures", async ()
     (completionOptions[0] as { signal: AbortSignal }).signal.aborted,
     true,
   );
-  assert.ok(appended.every((entry) => entry.branch === "B"));
-  assert.equal(JSON.stringify(appended).includes("Branch A"), false);
+  const billed = appended.filter((entry) =>
+    (entry.data as { callUsage: { totalTokens: number } }).callUsage.totalTokens);
+  assert.ok(billed.every((entry) => entry.branch === "B"));
+  assert.equal(JSON.stringify(billed).includes("Branch A"), false);
   assert.equal(JSON.stringify(appended).includes("Branch B"), true);
 
   branch = [...branch, userEntry("b2", "Retry branch B", "b1")];
@@ -1644,8 +1637,8 @@ test("lifecycle reconciles on settlement and recovers update failures", async ()
   branch = [...branch, userEntry("b3", "Finish branch B", "b2")];
   failAppend = true;
   await settle({}, ctx);
-  assert.equal(branch.at(-1)?.id, "b3");
-  assert.deepEqual(rollbackIds, ["b3"]);
+  assert.equal(branch.at(-1)?.type, "custom");
+  assert.deepEqual(rollbackIds, [branch.at(-1)?.id]);
   assert.equal(completeCalls, 4);
   branch = [...branch, userEntry("b4", "Continue branch B", "b3")];
   contextTokens = 20;
@@ -1662,7 +1655,7 @@ test("lifecycle reconciles on settlement and recovers update failures", async ()
     true,
   );
   const recovered = restoreSavedState(branch);
-  assert.equal(recovered.open?.throughEntryId, "b4");
+  assert.equal(recovered.open?.throughEntryId, "b4-assistant");
   assert.equal(recovered.open?.contextStart.tokens, 20);
   await settle({}, ctx);
   assert.equal(completeCalls, 5);
@@ -1977,7 +1970,8 @@ test("panes render live activity during thinking and tool execution", async (t) 
   await flush();
   assert.equal(renderRequests, rendersBeforeCheck);
   assert.match(render(), /Repair authentication failure/);
-  assert.deepEqual(restoreSavedState(branch), settledHistory);
+  assert.deepEqual(restoreSavedState(branch).steps.slice(0, settledHistory.steps.length), settledHistory.steps);
+  assert.equal(restoreSavedState(branch).steps.at(-1)?.summary, settledHistory.open?.summary);
   assert.equal(collectStats(branch).summaryTokens, collectStats(entries).summaryTokens + 2);
   handlers.get("turn_end")?.(routine, ctx);
   await flush();
@@ -2001,8 +1995,11 @@ test("panes render live activity during thinking and tool execution", async (t) 
   assert.match(render(), /Repairing corrupted billing queue/);
   assert.match(render(), /Live ·/);
   shortcuts.get("ctrl+shift+m")?.();
-  assert.match(render(), /Repairing corrupted billing queue/); // Both pane sizes use the provisional title.
-  assert.deepEqual(restoreSavedState(branch), settledHistory);
+  assert.match(render(), /Repairing corrupted billing queue/); // Both pane sizes retain pivot rows.
+  const pivots = restoreSavedState(branch);
+  assert.deepEqual(pivots.steps.slice(0, settledHistory.steps.length), settledHistory.steps);
+  assert.equal(pivots.steps.length, settledHistory.steps.length + 3);
+  assert.equal(pivots.open?.summary, "Repairing corrupted billing queue to unblock recovery");
 
   addTurn("Routine verification of the queue repair");
   requests[3]!.resolve(response("not a direction plan"));
@@ -2058,4 +2055,107 @@ test("panes render live activity during thinking and tool execution", async (t) 
   shutdownRequest.resolve(response("STEP NEW | Cancelled direction must not persist after shutdown"));
   await flush();
   assert.equal(appendedEntries, entriesBeforeShutdown);
+});
+
+
+test("steering and handback retain rows and retry billed live checkpoints", async () => {
+  type Handler = (event: unknown, ctx: ExtensionContext) => unknown;
+  const handlers = new Map<string, Handler>();
+  const manager = SessionManager.inMemory(process.cwd());
+  const notices: string[] = [];
+  const requests: string[] = [];
+  const pivot = "Investigating independent billing outage after authentication repair";
+  const liveAnswers = ["UNCHANGED", `STEP NEW | ${pivot}`, `STEP NEW | ${pivot}`, "UNCHANGED"];
+  let failCheckpoint = true;
+  let completeCalls = 0;
+  const response = (text: string) => ({
+    role: "assistant" as const,
+    content: [{ type: "text" as const, text }],
+    api: "test", provider: "test", model: "test",
+    usage: usage(1, 1), stopReason: "stop" as const, timestamp: 1,
+  });
+  const ctx = {
+    mode: "tui", hasUI: true, model: { contextWindow: 100 },
+    sessionManager: manager, isIdle: () => true,
+    getContextUsage: () => ({ tokens: 10, percent: 10, contextWindow: 100 }),
+    ui: { notify: (message: string) => notices.push(message) },
+    modelRegistry: {
+      complete: async (_model: unknown, request: { systemPrompt: string; messages: Array<{ content: Array<{ text: string }> }> }) => {
+        completeCalls++;
+        requests.push(request.messages[0]!.content[0]!.text);
+        return response(request.systemPrompt === LIVE_DIRECTION_SYSTEM_PROMPT
+          ? liveAnswers.shift()!
+          : "STEP CURRENT+NEW | Verified final recovery after observed billing pivot");
+      },
+    },
+  } as unknown as ExtensionContext;
+  const pi = {
+    on: (event: string, handler: Handler) => handlers.set(event, handler),
+    registerCommand: () => {}, registerShortcut: () => {},
+    appendEntry: (type: string, data: { callUsage: { totalTokens: number } }) => {
+      manager.appendCustomEntry(type, data);
+      if (failCheckpoint && data.callUsage.totalTokens) {
+        failCheckpoint = false;
+        throw new Error("checkpoint failed after leaf mutation");
+      }
+    },
+  } as unknown as ExtensionAPI;
+  minimapExtension(pi);
+  const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
+  const rows = () => {
+    const saved = restoreSavedState(manager.getBranch());
+    return [...saved.steps, ...(saved.open ? [saved.open] : [])];
+  };
+  const steer = (text: string) => {
+    const message = { role: "user" as const, content: text, timestamp: 1 };
+    // Pi emits message_end before persisting the consumed steering message.
+    handlers.get("message_end")?.({ message }, ctx);
+    manager.appendMessage(message);
+  };
+  let turn = 0;
+  const addTurn = (text: string) => {
+    const id = `call-${++turn}`;
+    const message = { ...response(text), stopReason: "toolUse" as const,
+      content: [...response(text).content, { type: "toolCall" as const, id, name: "read", arguments: {} }] };
+    const result = { role: "toolResult" as const, toolCallId: id, toolName: "read",
+      content: [{ type: "text" as const, text: "Public tool result" }], isError: false, timestamp: 1 };
+    manager.appendMessage(message);
+    manager.appendMessage(result);
+    const event = { message, toolResults: [result] };
+    handlers.get("turn_end")?.(event, ctx);
+    return event;
+  };
+
+  handlers.get("before_agent_start")?.({ prompt: "Repair authentication" }, ctx);
+  steer("Repair authentication");
+  const routine = addTurn("Checking authentication data");
+  await flush();
+  assert.equal(completeCalls, 1);
+  assert.equal(rows().length, 1);
+  assert.equal(collectStats(manager.getBranch()).summaryTokens, 0);
+  assert.match(notices[0] ?? "", /checkpoint failed/);
+  handlers.get("turn_end")?.(routine, ctx);
+  await flush();
+  assert.equal(completeCalls, 1); // Retry persistence, not the provider.
+  assert.equal(collectStats(manager.getBranch()).summaryTokens, 2);
+
+  addTurn("Authentication is fixed; billing needs independent recovery");
+  await flush();
+  assert.deepEqual(rows().map((step) => step.summary), ["Repair authentication", pivot]);
+  addTurn("Routine billing verification");
+  await flush();
+  assert.equal(rows().length, 2); // An identical title is not another pivot.
+
+  steer("Verify billing recovery");
+  assert.equal(rows().length, 2); // Steering does not hide the last pivot.
+  addTurn("Checking final billing recovery");
+  await flush();
+  assert.equal(rows().length, 3);
+  assert.match(requests.at(-1) ?? "", /CURRENT MILESTONE: Verify billing recovery/);
+  assert.doesNotMatch(requests.at(-1) ?? "", /Checking authentication data/);
+  await handlers.get("agent_settled")?.({}, ctx);
+  assert.deepEqual(rows().map((step) => step.summary), [
+    "Repair authentication", pivot, "Verified final recovery after observed billing pivot",
+  ]);
+  assert.equal(collectStats(manager.getBranch()).summaryTokens, completeCalls * 2);
 });
