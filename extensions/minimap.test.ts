@@ -2075,6 +2075,14 @@ test("panes render live activity during thinking and tool execution", async (t) 
 test("steering and handback retain rows and retry billed live checkpoints", async (t) => {
   type Handler = (event: unknown, ctx: ExtensionContext) => unknown;
   const handlers = new Map<string, Handler>();
+  const shortcuts = new Map<string, () => void>();
+  let component: Component | undefined;
+  const tui = { requestRender: () => {}, terminal: { rows: 40 } } as unknown as TUI;
+  const theme = {
+    fg: (_color: string, text: string) => text,
+    bg: (_color: string, text: string) => text,
+    bold: (text: string) => text,
+  } as unknown as Theme;
   const manager = SessionManager.inMemory(process.cwd());
   const notices: string[] = [];
   const requests: string[] = [];
@@ -2092,7 +2100,15 @@ test("steering and handback retain rows and retry billed live checkpoints", asyn
     mode: "tui", hasUI: true, model: { contextWindow: 100 },
     sessionManager: manager, isIdle: () => true,
     getContextUsage: () => ({ tokens: 10, percent: 10, contextWindow: 100 }),
-    ui: { notify: (message: string) => notices.push(message) },
+    ui: {
+      notify: (message: string) => notices.push(message),
+      custom: (factory: (tui: TUI, theme: Theme, keybindings: never, done: () => void) => Component,
+        options: { onHandle?: (handle: OverlayHandle) => void }) => {
+        component = factory(tui, theme, {} as never, () => {});
+        options.onHandle?.({ setHidden: () => {}, isHidden: () => false } as unknown as OverlayHandle);
+        return Promise.resolve(undefined);
+      },
+    },
     modelRegistry: {
       complete: async (_model: unknown, request: { systemPrompt: string; messages: Array<{ content: Array<{ text: string }> }> }) => {
         completeCalls++;
@@ -2105,7 +2121,8 @@ test("steering and handback retain rows and retry billed live checkpoints", asyn
   } as unknown as ExtensionContext;
   const pi = {
     on: (event: string, handler: Handler) => handlers.set(event, handler),
-    registerCommand: () => {}, registerShortcut: () => {},
+    registerCommand: () => {},
+    registerShortcut: (key: string, options: { handler: () => void }) => shortcuts.set(key, options.handler),
     appendEntry: (type: string, data: { callUsage: { totalTokens: number } }) => {
       manager.appendCustomEntry(type, data);
       if (failCheckpoint && data.callUsage.totalTokens) {
@@ -2116,6 +2133,24 @@ test("steering and handback retain rows and retry billed live checkpoints", asyn
   } as unknown as ExtensionAPI;
   minimapExtension(pi);
   const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
+  await handlers.get("session_start")?.({}, ctx);
+  const header = (expanded = false) => {
+    if (expanded) shortcuts.get("ctrl+shift+m")?.();
+    assert.ok(component);
+    const text = component.render(120).join("\n").split("Live ·")[0]!;
+    if (expanded) shortcuts.get("ctrl+shift+m")?.();
+    return text;
+  };
+  const assertCurrent = (calls: number, errors: number) => {
+    assert.match(header(), new RegExp(`working · read×${calls}\\b`));
+    if (errors) {
+      assert.match(header(), new RegExp(`${errors} step failures`));
+      assert.match(header(true), new RegExp(`${errors} current failures`));
+    } else {
+      assert.doesNotMatch(header(), /step failures/);
+      assert.doesNotMatch(header(true), /current failures/);
+    }
+  };
   const rows = () => {
     const saved = restoreSavedState(manager.getBranch());
     return [...saved.steps, ...(saved.open ? [saved.open] : [])];
@@ -2127,13 +2162,15 @@ test("steering and handback retain rows and retry billed live checkpoints", asyn
     manager.appendMessage(message);
   };
   let turn = 0;
-  const addTurn = (text: string) => {
+  const addTurn = (text: string, isError = false) => {
     const id = `call-${++turn}`;
     const message = { ...response(text), stopReason: "toolUse" as const,
       content: [...response(text).content, { type: "toolCall" as const, id, name: "read", arguments: {} }] };
     const result = { role: "toolResult" as const, toolCallId: id, toolName: "read",
-      content: [{ type: "text" as const, text: "Public tool result" }], isError: false, timestamp: 1 };
+      content: [{ type: "text" as const, text: "Public tool result" }], isError, timestamp: 1 };
     manager.appendMessage(message);
+    handlers.get("tool_execution_start")?.({ toolName: "read" }, ctx);
+    handlers.get("tool_execution_end")?.({ toolName: "read", isError }, ctx);
     manager.appendMessage(result);
     const event = { message, toolResults: [result] };
     handlers.get("turn_end")?.(event, ctx);
@@ -2142,7 +2179,7 @@ test("steering and handback retain rows and retry billed live checkpoints", asyn
 
   handlers.get("before_agent_start")?.({ prompt: "Repair authentication" }, ctx);
   steer("Repair authentication");
-  const routine = addTurn("Checking authentication data");
+  const routine = addTurn("Checking authentication data", true);
   await flush();
   assert.equal(completeCalls, 1);
   assert.equal(rows().length, 1);
@@ -2152,21 +2189,29 @@ test("steering and handback retain rows and retry billed live checkpoints", asyn
   await flush();
   assert.equal(completeCalls, 1); // Retry persistence, not the provider.
   assert.equal(collectStats(manager.getBranch()).summaryTokens, 2);
+  assertCurrent(1, 1);
 
   addTurn("Authentication is fixed; billing needs independent recovery");
   await flush();
   assert.deepEqual(rows().map((step) => step.summary), ["Repair authentication", pivot]);
+  assertCurrent(1, 0); // A public pivot excludes preceding failures.
+  assert.equal(rows()[0]?.errors, 1);
   addTurn("Routine billing verification");
   await flush();
   assert.equal(rows().length, 2); // An identical title is not another pivot.
+  assertCurrent(2, 0); // Include pending activity after the pivot checkpoint.
 
   steer("Verify billing recovery");
   assert.equal(rows().length, 2); // Steering does not hide the last pivot.
+  assert.doesNotMatch(header(), /working ·|step failures/); // Do not wait for the next checkpoint.
+  assert.doesNotMatch(header(true), /current failures/);
   addTurn("Checking final billing recovery");
   await flush();
   assert.equal(rows().length, 3);
   assert.match(requests.at(-1) ?? "", /CURRENT MILESTONE: Verify billing recovery/);
   assert.doesNotMatch(requests.at(-1) ?? "", /Checking authentication data/);
+  assertCurrent(1, 0); // Consumed steering starts a new counter scope.
+  assert.equal(rows()[1]?.tools.read, 2);
   await handlers.get("agent_settled")?.({}, ctx);
   assert.deepEqual(rows().map((step) => step.summary), [
     "Repair authentication", pivot, "Verified final recovery after observed billing pivot",
@@ -2182,6 +2227,13 @@ test("steering and handback retain rows and retry billed live checkpoints", asyn
     [[image], "User request"],
     [[image, { type: "text" as const, text: dimensionNote }], "User request"],
     [[image, { type: "text" as const, text: `Inspect payment screenshot\n\n${dimensionNote}` }], "Inspect payment screenshot"],
+    [[image, { type: "text" as const, text: "[Image converted from image/bmp to image/png.]" }], "User request"],
+    [[{ type: "text" as const, text: "[Image omitted: could not be converted to a supported inline image format.]" }], "User request"],
+    [[{ type: "text" as const, text: "[Image omitted: could not be resized below the inline image size limit.]" }], "User request"],
+    [[image, { type: "text" as const, text: "Inspect payment screenshot\n\n[Image converted from image/bmp to image/png.]" }], "Inspect payment screenshot"],
+    [[{ type: "text" as const, text: "Inspect payment screenshot\n\n[Image omitted: could not be resized below the inline image size limit.]" }], "Inspect payment screenshot"],
+    [[image, { type: "text" as const, text: `[Image converted from image/tiff to image/png.]\n${dimensionNote}` }], "User request"],
+    [[image, { type: "text" as const, text: "[Image shows payment failure]" }], "[Image shows payment failure]"],
     ["/tmp/minimap-screenshot.png", "User request"],
   ] satisfies Array<[UserMessage["content"], string]>) {
     const previousTitles = rows().map((step) => step.summary);
@@ -2222,4 +2274,5 @@ test("steering and handback retain rows and retry billed live checkpoints", asyn
   assert.equal(delayed.length, 2);
   assert.equal(collectStats(manager.getBranch()).summaryTokens, beforeLate.summaryTokens + 33);
   assert.equal(rows().at(-1)?.summary, "Verified delayed checkpoint recovery with retained usage");
+  handlers.get("session_shutdown")?.({}, ctx);
 });

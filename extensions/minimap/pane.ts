@@ -29,6 +29,8 @@ import {
   conciseStep,
   failureReview,
   isConsequentialDecision,
+  isStandaloneSkillInjection,
+  textContent,
   oneLine,
   readableGoal,
 } from "./diagnostics.ts";
@@ -388,7 +390,22 @@ export class MinimapPane implements Component {
     const entryIndexes = new Map(
       entries.map((entry, index) => [entry.id, index]),
     );
-    return { entries, stats, context, resets, entryIndexes };
+    const previousThrough = this.state.open?.throughEntryId ?? this.state.steps.at(-1)?.throughEntryId;
+    const pending = entriesAfter(entries, previousThrough);
+    // Consumed steering is visible before its turn-end checkpoint.
+    const latestUser = pending.reduce((latest, entry, index) => entry.type === "message" &&
+      entry.message.role === "user" && !isStandaloneSkillInjection(textContent(entry.message.content))
+      ? index : latest, -1);
+    const open = latestUser < 0 ? this.state.open : undefined;
+    const pendingStats = collectStepStats(this.state.current?.label
+      ? pending.slice(Math.max(0, latestUser)) : []);
+    const liveTools = Object.assign(emptyCounts(), open?.tools);
+    for (const [name, count] of Object.entries(pendingStats.tools))
+      liveTools[name] = (liveTools[name] ?? 0) + count;
+    const liveUsage = { ...(open?.usage ?? emptyUsage()) };
+    addUsage(liveUsage, pendingStats.usage);
+    const liveErrors = (open?.errors ?? 0) + pendingStats.errors;
+    return { entries, stats, context, resets, entryIndexes, liveTools, liveUsage, liveErrors };
   }
 
   private renderExpanded(width: number): string[] {
@@ -417,7 +434,7 @@ export class MinimapPane implements Component {
         .join("  ");
     };
 
-    const { entries, stats, context, resets, entryIndexes } =
+    const { entries, stats, context, resets, entryIndexes, liveTools, liveUsage, liveErrors } =
       this.sessionData();
     const efficiency = sessionEfficiency(entries, stats);
     const review = failureReview(entries, stats.tools);
@@ -426,18 +443,6 @@ export class MinimapPane implements Component {
     const liveEntries = entries.slice(lastBoundary + 1);
     const failureStreak = trailingFailureStreak(liveEntries);
     const liveSummary = this.state.current?.label;
-    const previousThrough =
-      this.state.open?.throughEntryId ??
-      this.state.steps.at(-1)?.throughEntryId;
-    const pendingStats = collectStepStats(
-      liveSummary ? entriesAfter(entries, previousThrough) : [],
-    );
-    const liveTools = Object.assign(emptyCounts(), this.state.open?.tools);
-    for (const [name, count] of Object.entries(pendingStats.tools))
-      liveTools[name] = (liveTools[name] ?? 0) + count;
-    const liveUsage = { ...(this.state.open?.usage ?? emptyUsage()) };
-    addUsage(liveUsage, pendingStats.usage);
-    const liveErrors = (this.state.open?.errors ?? 0) + pendingStats.errors;
     const liveCalls = Object.values(liveTools).reduce(
       (sum, count) => sum + count,
       0,
@@ -796,7 +801,7 @@ export class MinimapPane implements Component {
       return "";
     };
 
-    const { stats, context, resets, entryIndexes } = this.sessionData();
+    const { stats, context, resets, entryIndexes, liveTools, liveErrors } = this.sessionData();
     const history: string[] = [];
     const cardStarts: number[] = [];
     let previousBoundary = -1;
@@ -845,7 +850,7 @@ export class MinimapPane implements Component {
     }
 
     const activity = this.state.current
-      ? topCounts(this.state.current.tools, 2)
+      ? topCounts(liveTools, 2)
       : "";
     const openResets = resets.filter(
       (reset) => reset.entryIndex > previousBoundary,
@@ -887,8 +892,8 @@ export class MinimapPane implements Component {
         range,
         resetCountLabel(openResets),
         activity ? `working · ${activity}` : "",
-        this.state.current?.errors
-          ? `${this.state.current.errors} step failures`
+        liveErrors
+          ? `${liveErrors} step failures`
           : "",
       ]
         .filter(Boolean)
