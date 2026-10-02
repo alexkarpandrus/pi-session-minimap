@@ -188,6 +188,8 @@ export default function minimapExtension(pi: ExtensionAPI) {
       flushPersistence(ctx);
       return;
     }
+    if (pendingPersistence?.generation === branchGeneration)
+      addUsage(data.callUsage, pendingPersistence.data.callUsage);
     pendingPersistence = { generation: branchGeneration, data, direction, current: state.current };
     flushPersistence(ctx);
   };

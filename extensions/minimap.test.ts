@@ -2072,7 +2072,7 @@ test("panes render live activity during thinking and tool execution", async (t) 
 });
 
 
-test("steering and handback retain rows and retry billed live checkpoints", async () => {
+test("steering and handback retain rows and retry billed live checkpoints", async (t) => {
   type Handler = (event: unknown, ctx: ExtensionContext) => unknown;
   const handlers = new Map<string, Handler>();
   const manager = SessionManager.inMemory(process.cwd());
@@ -2189,4 +2189,29 @@ test("steering and handback retain rows and retry billed live checkpoints", asyn
     assert.equal(rows().length, previousTitles.length + 1);
   }
   assert.equal(collectStats(manager.getBranch()).summaryTokens, completeCalls * 2);
+
+  const delayed: Array<(value: ReturnType<typeof response>) => void> = [];
+  t.mock.method(ctx.modelRegistry, "complete", () =>
+    new Promise<ReturnType<typeof response>>((resolve) => delayed.push(resolve)));
+  handlers.get("before_agent_start")?.({ prompt: "Verify delayed checkpoint recovery" }, ctx);
+  steer("Verify delayed checkpoint recovery");
+  addTurn("Checking delayed billing");
+  const beforeLate = collectStats(manager.getBranch());
+  const noticesBeforeLate = notices.length;
+  const settling = Promise.resolve(handlers.get("agent_settled")?.({}, ctx));
+  assert.equal(delayed.length, 2);
+  failCheckpoint = true;
+  delayed[0]!({ ...response("STEP NEW | Stale direction must not overwrite the settlement"), usage: usage(11, 0) });
+  await flush();
+  assert.match(notices.at(-1) ?? "", /checkpoint failed/);
+  assert.equal(notices.length, noticesBeforeLate + 1);
+  assert.equal(collectStats(manager.getBranch()).summaryTokens, beforeLate.summaryTokens);
+  delayed[1]!({ ...response("STEP CURRENT+NEW | Verified delayed checkpoint recovery with retained usage"), usage: usage(22, 0) });
+  await settling;
+  assert.equal(collectStats(manager.getBranch()).summaryTokens, beforeLate.summaryTokens + 33);
+  assert.equal(collectStats(manager.getBranch()).cost, beforeLate.cost + 0.02);
+  await handlers.get("agent_settled")?.({}, ctx);
+  assert.equal(delayed.length, 2);
+  assert.equal(collectStats(manager.getBranch()).summaryTokens, beforeLate.summaryTokens + 33);
+  assert.equal(rows().at(-1)?.summary, "Verified delayed checkpoint recovery with retained usage");
 });
