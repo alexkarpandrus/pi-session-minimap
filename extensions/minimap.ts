@@ -80,6 +80,7 @@ export {
 } from "./minimap/pane.ts";
 
 export default function minimapExtension(pi: ExtensionAPI) {
+  const promptLabel = (text: string) => readableGoal(text) || "User request";
   const state: ViewState = { steps: [], open: undefined, current: undefined };
   let overlay: OverlayHandle | undefined;
   let pane: MinimapPane | undefined;
@@ -232,8 +233,9 @@ export default function minimapExtension(pi: ExtensionAPI) {
     const pending = entriesAfter(branch, state.open?.throughEntryId ?? state.steps.at(-1)?.throughEntryId);
     for (const [index, entry] of pending.entries()) {
       if (entry.type !== "message" || entry.message.role !== "user") continue;
-      const label = readableGoal(textContent(entry.message.content));
-      if (!label || isStandaloneSkillInjection(textContent(entry.message.content))) continue;
+      const text = textContent(entry.message.content);
+      if (isStandaloneSkillInjection(text)) continue;
+      const label = promptLabel(text);
       const previous = pending[index - 1] ?? branch[branch.indexOf(entry) - 1];
       startStep(ctx, label, entry.id, previous?.id);
       directionThroughEntryId = entry.id;
@@ -293,12 +295,13 @@ export default function minimapExtension(pi: ExtensionAPI) {
           signal: controller.signal,
         },
       );
-      // Keep published boundaries intact, and never overwrite another run.
-      if (
-        controller.signal.aborted || generation !== branchGeneration ||
-        state.current !== current
-      ) return;
+      if (generation !== branchGeneration) return;
       const callUsage = usageSnapshot(response.usage);
+      // A stale title does not invalidate billed usage from the same branch.
+      if (controller.signal.aborted || state.current !== current) {
+        persist(ctx, { version: STEP_VERSION, usageOnly: true, callUsage });
+        return;
+      }
       const text = textContent(response.content).trim();
       const plan = response.stopReason !== "error" && response.stopReason !== "aborted"
         ? parseTailPlan(text, ["NEW"]) : undefined;
@@ -671,10 +674,7 @@ export default function minimapExtension(pi: ExtensionAPI) {
     runContextStart = snapshotContext(ctx);
     streamingActivity = false;
     state.current = {
-      label:
-        readableGoal(event.prompt) ||
-        state.open?.summary ||
-        "Starting semantic step",
+      label: promptLabel(event.prompt),
       tools: emptyCounts(),
       errors: 0,
       phase: { label: "Starting", startedAt: Date.now() },
@@ -733,8 +733,9 @@ export default function minimapExtension(pi: ExtensionAPI) {
 
   pi.on("message_end", (event, ctx) => {
     if (event.message.role === "user") {
-      const label = readableGoal(textContent(event.message.content));
-      if (label && !isStandaloneSkillInjection(textContent(event.message.content))) {
+      const text = textContent(event.message.content);
+      const label = promptLabel(text);
+      if (!isStandaloneSkillInjection(text)) {
         cancelDirectionUpdate();
         runContextStart = snapshotContext(ctx);
         if (state.current) state.current = { ...state.current, label };

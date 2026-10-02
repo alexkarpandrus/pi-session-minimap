@@ -7,6 +7,7 @@ import type {
   Theme,
 } from "@earendil-works/pi-coding-agent";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
+import type { UserMessage } from "@earendil-works/pi-ai";
 import {
   visibleWidth,
   type Component,
@@ -1802,6 +1803,8 @@ test("panes render live activity during thinking and tool execution", async (t) 
 
   let now = 10_000;
   t.mock.method(Date, "now", () => now);
+  handlers.get("before_agent_start")?.({ prompt: "" }, ctx);
+  assert.match(component?.render(96).join("\n") ?? "", /User request/);
   handlers.get("before_agent_start")?.(
     { prompt: "Fix live minimap labels" },
     ctx,
@@ -1809,6 +1812,10 @@ test("panes render live activity during thinking and tool execution", async (t) 
   const active = component?.render(96) ?? [];
   assert.match(active.join("\n"), /Fix live minimap labels/);
   assert.doesNotMatch(active.join("\n"), /Starting semantic step/);
+  assert.match(active.join("\n"), /Repair authentication failure/);
+  shortcuts.get("ctrl+shift+m")?.();
+  assert.match(component?.render(96).join("\n") ?? "", /Repair authentication failure/);
+  shortcuts.get("ctrl+shift+m")?.();
 
   const render = () => component?.render(96).join("\n") ?? "";
   const stream = (assistantMessageEvent: unknown) =>
@@ -2015,17 +2022,24 @@ test("panes render live activity during thinking and tool execution", async (t) 
   handlers.get("before_agent_start")?.({ prompt: "Verify billing recovery" }, ctx);
   assert.equal(oldRun.signal?.aborted, true);
   const entriesBeforeStale = appendedEntries;
+  const statsBeforeStale = collectStats(branch);
   oldRun.resolve(response("STEP NEW | Stale direction from the previous active run"));
   await flush();
-  assert.equal(appendedEntries, entriesBeforeStale);
+  assert.equal(appendedEntries, entriesBeforeStale + 1);
+  assert.equal(collectStats(branch).summaryTokens, statsBeforeStale.summaryTokens + 2);
+  assert.equal(collectStats(branch).cost, statsBeforeStale.cost + 0.01);
   assert.match(render(), /Verify billing recovery/);
   assert.doesNotMatch(render(), /Stale direction/);
 
   addTurn("Another significant direction before settlement");
   const unsettled = requests[6]!;
+  const statsBeforeSettlement = collectStats(branch);
   const settling = Promise.resolve(handlers.get("agent_settled")?.({}, ctx));
   assert.equal(unsettled.signal?.aborted, true);
   unsettled.resolve(response("STEP NEW | Stale direction must not overwrite settled history"));
+  await flush();
+  assert.equal(collectStats(branch).summaryTokens, statsBeforeSettlement.summaryTokens + 2);
+  assert.equal(collectStats(branch).cost, statsBeforeSettlement.cost + 0.01);
   const finalRequest = requests[7]!;
   assert.notEqual(finalRequest.systemPrompt, LIVE_DIRECTION_SYSTEM_PROMPT);
   const sourceIds = [...finalRequest.prompt.matchAll(/^(S\d+|CURRENT|NEW|N\d+):/gm)].map((match) => match[1]);
@@ -2065,7 +2079,7 @@ test("steering and handback retain rows and retry billed live checkpoints", asyn
   const notices: string[] = [];
   const requests: string[] = [];
   const pivot = "Investigating independent billing outage after authentication repair";
-  const liveAnswers = ["UNCHANGED", `STEP NEW | ${pivot}`, `STEP NEW | ${pivot}`, "UNCHANGED"];
+  const liveAnswers = ["UNCHANGED", `STEP NEW | ${pivot}`, `STEP NEW | ${pivot}`, "UNCHANGED", "UNCHANGED", "UNCHANGED"];
   let failCheckpoint = true;
   let completeCalls = 0;
   const response = (text: string) => ({
@@ -2106,8 +2120,8 @@ test("steering and handback retain rows and retry billed live checkpoints", asyn
     const saved = restoreSavedState(manager.getBranch());
     return [...saved.steps, ...(saved.open ? [saved.open] : [])];
   };
-  const steer = (text: string) => {
-    const message = { role: "user" as const, content: text, timestamp: 1 };
+  const steer = (content: UserMessage["content"]) => {
+    const message = { role: "user" as const, content, timestamp: 1 };
     // Pi emits message_end before persisting the consumed steering message.
     handlers.get("message_end")?.({ message }, ctx);
     manager.appendMessage(message);
@@ -2157,5 +2171,22 @@ test("steering and handback retain rows and retry billed live checkpoints", asyn
   assert.deepEqual(rows().map((step) => step.summary), [
     "Repair authentication", pivot, "Verified final recovery after observed billing pivot",
   ]);
+  assert.equal(collectStats(manager.getBranch()).summaryTokens, completeCalls * 2);
+
+  for (const content of [
+    [{ type: "image" as const, data: "dGVzdA==", mimeType: "image/png" }],
+    "/tmp/minimap-screenshot.png",
+  ]) {
+    const previousTitles = rows().map((step) => step.summary);
+    handlers.get("before_agent_start")?.({ prompt: "Follow the next request" }, ctx);
+    steer(content);
+    addTurn("Reviewed the supplied screenshot");
+    await flush();
+    assert.deepEqual(rows().map((step) => step.summary), [...previousTitles, "User request"]);
+    assert.match(requests.at(-1) ?? "", /CURRENT MILESTONE: User request/);
+    await handlers.get("agent_settled")?.({}, ctx);
+    assert.deepEqual(rows().slice(0, -1).map((step) => step.summary), previousTitles);
+    assert.equal(rows().length, previousTitles.length + 1);
+  }
   assert.equal(collectStats(manager.getBranch()).summaryTokens, completeCalls * 2);
 });

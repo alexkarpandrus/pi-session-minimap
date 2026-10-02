@@ -73,6 +73,8 @@ The dashboard adds a five-column timeline, nested tool tokens, invoked skill tot
 
 Each consumed user prompt starts an entry, including steering inside an active run. The entry settles when control returns to the user. The agent can add intermediate milestones for significant pivots; routine work phases and retries do not add entries.
 
+Image-only and screenshot-path-only prompts start with the title `User request`. The summarizer can refine that title after observing public activity.
+
 After each settled run, the extension compares the latest milestone with new activity. The summarizer can refine its title or add distinct outcomes, but it cannot merge away previous entries. A confident Jev merge extends the latest milestone directly and keeps its title. Metrics are recomputed from their original session entries.
 
 The extension uses your selected pi model and stores compact revision metadata in the pi session file. Its summary calls use tokens from your active model provider; the minimap reports that spend separately.
