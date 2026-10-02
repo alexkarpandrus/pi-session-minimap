@@ -80,7 +80,9 @@ export {
 } from "./minimap/pane.ts";
 
 export default function minimapExtension(pi: ExtensionAPI) {
-  const promptLabel = (text: string) => readableGoal(text) || "User request";
+  // ponytail: native single-line dimension notes; update the matcher if pi changes their format.
+  const promptLabel = (text: string) =>
+    readableGoal(text.replace(/^\[Image: original [^\n]*\]$/gm, "")) || "User request";
   const state: ViewState = { steps: [], open: undefined, current: undefined };
   let overlay: OverlayHandle | undefined;
   let pane: MinimapPane | undefined;

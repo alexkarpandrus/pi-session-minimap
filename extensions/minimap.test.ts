@@ -6,7 +6,7 @@ import type {
   SessionEntry,
   Theme,
 } from "@earendil-works/pi-coding-agent";
-import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { formatDimensionNote, SessionManager } from "@earendil-works/pi-coding-agent";
 import type { UserMessage } from "@earendil-works/pi-ai";
 import {
   visibleWidth,
@@ -2079,7 +2079,7 @@ test("steering and handback retain rows and retry billed live checkpoints", asyn
   const notices: string[] = [];
   const requests: string[] = [];
   const pivot = "Investigating independent billing outage after authentication repair";
-  const liveAnswers = ["UNCHANGED", `STEP NEW | ${pivot}`, `STEP NEW | ${pivot}`, "UNCHANGED", "UNCHANGED", "UNCHANGED"];
+  const liveAnswers = ["UNCHANGED", `STEP NEW | ${pivot}`, `STEP NEW | ${pivot}`, "UNCHANGED"];
   let failCheckpoint = true;
   let completeCalls = 0;
   const response = (text: string) => ({
@@ -2173,17 +2173,25 @@ test("steering and handback retain rows and retry billed live checkpoints", asyn
   ]);
   assert.equal(collectStats(manager.getBranch()).summaryTokens, completeCalls * 2);
 
-  for (const content of [
-    [{ type: "image" as const, data: "dGVzdA==", mimeType: "image/png" }],
-    "/tmp/minimap-screenshot.png",
-  ]) {
+  const image = { type: "image" as const, data: "dGVzdA==", mimeType: "image/png" };
+  const dimensionNote = formatDimensionNote({
+    ...image, originalWidth: 3840, originalHeight: 2160,
+    width: 2000, height: 1125, wasResized: true,
+  })!;
+  for (const [content, label] of [
+    [[image], "User request"],
+    [[image, { type: "text" as const, text: dimensionNote }], "User request"],
+    [[image, { type: "text" as const, text: `Inspect payment screenshot\n\n${dimensionNote}` }], "Inspect payment screenshot"],
+    ["/tmp/minimap-screenshot.png", "User request"],
+  ] satisfies Array<[UserMessage["content"], string]>) {
     const previousTitles = rows().map((step) => step.summary);
     handlers.get("before_agent_start")?.({ prompt: "Follow the next request" }, ctx);
     steer(content);
+    liveAnswers.push("UNCHANGED");
     addTurn("Reviewed the supplied screenshot");
     await flush();
-    assert.deepEqual(rows().map((step) => step.summary), [...previousTitles, "User request"]);
-    assert.match(requests.at(-1) ?? "", /CURRENT MILESTONE: User request/);
+    assert.deepEqual(rows().map((step) => step.summary), [...previousTitles, label]);
+    assert.ok((requests.at(-1) ?? "").startsWith(`CURRENT MILESTONE: ${label}\n`));
     await handlers.get("agent_settled")?.({}, ctx);
     assert.deepEqual(rows().slice(0, -1).map((step) => step.summary), previousTitles);
     assert.equal(rows().length, previousTitles.length + 1);
