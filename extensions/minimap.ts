@@ -264,12 +264,14 @@ export default function minimapExtension(pi: ExtensionAPI) {
     if (current.awaitingUser) {
       // message_end dispatch can await other handlers before Pi appends their final message.
       const consumed = entriesAfter(ctx.sessionManager.getBranch(), current.userAfterEntryId).flatMap((entry) =>
-        entry.type === "message" && entry.message.role === "user" && !isStandaloneSkillInjection(textContent(entry.message.content))
+        entry.type === "message" && entry.message.role === "user"
           ? [entry.message] : []).at(0);
       if (!consumed) return;
       const text = textContent(consumed.content);
+      const injection = isStandaloneSkillInjection(text);
       current.request = requestText(text);
-      current.label = promptLabel(text);
+      current.label = injection ? state.open?.summary ?? promptLabel(text) : promptLabel(text);
+      current.evidence = injection ? state.open?.evidence : "user";
       current.awaitingUser = false;
     }
     if (directionAbort) {
@@ -327,8 +329,8 @@ export default function minimapExtension(pi: ExtensionAPI) {
       const plan = response.stopReason !== "error" && response.stopReason !== "aborted"
         ? parseTailPlan(text, [refining ? "CURRENT" : "NEW"]) : undefined;
       const valid = text === "UNCHANGED" || (plan && !plan.decisions.length && (refining || Boolean(transcript)));
-      const label = valid ? plan?.groups[0]?.summary : undefined;
-      const evidence: TitleEvidence = refining ? (transcript && current.evidence !== "agent" ? "both" : current.evidence ?? "user") : "agent";
+      const label = valid && (refining || plan?.groups[0]?.summary !== current.label) ? plan?.groups[0]?.summary : undefined;
+      const evidence: TitleEvidence = refining ? (transcript ? (current.evidence === "user" || current.evidence === "both" ? "both" : "agent") : current.evidence ?? "user") : "agent";
       const direction = valid ? { throughEntryId: throughEntryId ?? directionThroughEntryId, label, ...(label ? { evidence } : {}) } : undefined;
       if (label && refining && state.open) {
         const { open } = reconcileTail(ctx.sessionManager.getBranch(), state.steps.at(-1)?.throughEntryId,
@@ -702,9 +704,10 @@ export default function minimapExtension(pi: ExtensionAPI) {
     directionThroughEntryId = ctx.sessionManager.getBranch().at(-1)?.id;
     runContextStart = snapshotContext(ctx);
     streamingActivity = false;
+    const injection = isStandaloneSkillInjection(event.prompt);
     state.current = {
-      label: promptLabel(event.prompt),
-      evidence: "user",
+      label: injection ? state.open?.summary ?? promptLabel(event.prompt) : promptLabel(event.prompt),
+      evidence: injection ? state.open?.evidence : "user",
       request: requestText(event.prompt),
       needsTitle: true,
       userAfterEntryId: directionThroughEntryId,

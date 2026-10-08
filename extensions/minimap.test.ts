@@ -2394,6 +2394,13 @@ test("Current infers user titles, refines without tools or rows, and replays evi
   assert.doesNotMatch(prompts[1]!, /PRIVATE_TITLE_SENTINEL/);
   assert.deepEqual(rows().map((step) => [step.summary, step.evidence]), [[refinedTitle, "both"]]);
   assertBadge("🔗", refinedTitle);
+  const beforeDuplicate = collectStats(manager.getBranch()).summaryTokens;
+  answers.unshift(`STEP NEW | ${refinedTitle}`);
+  turn("The repair direction is unchanged; continue the current payment confirmation work.");
+  await flush();
+  assertBadge("🔗", refinedTitle);
+  assert.deepEqual(rows().map((step) => [step.summary, step.evidence]), [[refinedTitle, "both"]]);
+  assert.equal(collectStats(manager.getBranch()).summaryTokens, beforeDuplicate + 2);
   for (const mode of ["live", "history"] as const)
     assert.doesNotMatch(buildTranscript(manager.getBranch(), 18_000, mode), /PRIVATE_TITLE_SENTINEL/);
 
@@ -2404,12 +2411,12 @@ test("Current infers user titles, refines without tools or rows, and replays evi
   turn("Continuing the invoice corruption investigation.");
   await flush();
   assert.equal(rows().length, 2);
-  assert.equal(collectStats(manager.getBranch()).summaryTokens, 8);
+  assert.equal(collectStats(manager.getBranch()).summaryTokens, 10);
   const settledTitle = "Resolved invoice corruption preserving payment confirmation retry policy";
   answers.push(`STEP CURRENT+NEW | ${settledTitle}`);
   await handlers.get("agent_settled")!({}, ctx);
   assert.deepEqual(rows().map((step) => [step.summary, step.evidence]), [[refinedTitle, "both"], [settledTitle, "agent"]]);
-  assert.equal(collectStats(manager.getBranch()).summaryTokens, 10);
+  assert.equal(collectStats(manager.getBranch()).summaryTokens, 12);
   assert.doesNotMatch(prompts.at(-1)!, /PRIVATE_TITLE_SENTINEL/);
 
   const shortTitle = "Proceed with the work approved by the user";
@@ -2493,4 +2500,45 @@ test("Current infers user titles, refines without tools or rows, and replays evi
   await flush();
   assert.equal(prompts.length, callsBeforeShutdown);
   assert.equal(manager.getBranch().length, entriesBeforeShutdown);
+
+  manager.newSession();
+  await handlers.get("session_start")!({}, ctx);
+  const skill = '<skill name="cloudflare" location="/x/SKILL.md">\nSKILL_CONTEXT_SENTINEL\n</skill>';
+  const skillTitle = "Deploy a Worker using the existing D1 database binding";
+  const skillRunner = new ExtensionRunner([
+    { path: "minimap", handlers: new Map([["message_end", [handlers.get("message_end")!]]]) },
+  ] as unknown as ConstructorParameters<typeof ExtensionRunner>[0], createExtensionRuntime(), process.cwd(), manager, ctx.modelRegistry);
+  t.mock.method(skillRunner, "createContext", () => ctx);
+  handlers.get("before_agent_start")!({ prompt: skill }, ctx);
+  const skillMessage = { role: "user" as const, content: skill, timestamp: 1 };
+  await skillRunner.emitMessageEnd({ type: "message_end", message: skillMessage });
+  manager.appendMessage(skillMessage);
+  const callsBeforeSkill = prompts.length;
+  handlers.get("message_start")!({ message: response("") }, ctx);
+  await flush();
+  assert.equal(prompts.length, callsBeforeSkill); // Context injection alone is not task evidence.
+  assert.doesNotMatch(component!.render(120).join("\n"), /<skill|SKILL_CONTEXT_SENTINEL|👤/);
+  manager.appendMessage(oldWork);
+  manager.appendMessage({ ...oldResult, content: [{ type: "text", text: "Skill run read failed" }] });
+  answers.unshift(`STEP CURRENT | ${skillTitle}`);
+  turn("I will deploy the Worker using the existing D1 binding.");
+  await flush();
+  assert.equal(prompts.length, callsBeforeSkill + 1);
+  assert.doesNotMatch(prompts.at(-1)!, /<skill|SKILL_CONTEXT_SENTINEL/);
+  assert.deepEqual(rows().map((step) => [step.summary, step.evidence]), [[skillTitle, "agent"]]);
+  assertBadge("🤖", skillTitle);
+  for (let layout = 0; layout < 2; layout++) {
+    const header = component!.render(120).join("\n").split("Live ·")[0]!;
+    assert.match(header, /read×1|100% calls/);
+    assert.match(header, /1 (?:step|current) failures/);
+    shortcuts.get("ctrl+shift+m")!();
+  }
+  handlers.get("before_agent_start")!({ prompt: skill }, ctx);
+  assertBadge("🤖", skillTitle); // Context-only invocation retains known title evidence.
+  const skillRequest = "Repair payment notifications using the existing D1 binding";
+  handlers.get("before_agent_start")!({ prompt: `${skill}\n${skillRequest}` }, ctx);
+  const skillPreview = component!.render(120).join("\n");
+  assert.doesNotMatch(skillPreview, /<skill|SKILL_CONTEXT_SENTINEL/);
+  assert.match(skillPreview, /👤 Repair payment notifications/);
+  handlers.get("session_shutdown")!({}, ctx);
 });
