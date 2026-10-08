@@ -21,6 +21,7 @@ import {
   type SessionStats,
   type UsageSnapshot,
   type ViewState,
+  type TitleEvidence,
 } from "./state.ts";
 import {
   collectContextResets,
@@ -29,10 +30,14 @@ import {
   conciseStep,
   failureReview,
   isConsequentialDecision,
+  isStandaloneSkillInjection,
+  textContent,
   oneLine,
   readableGoal,
 } from "./diagnostics.ts";
 
+const titleBadge = (evidence?: TitleEvidence): string =>
+  evidence ? `${{ user: "👤", agent: "🤖", both: "🔗" }[evidence]} ` : "";
 export const scrollWindow = (
   length: number,
   viewport: number,
@@ -388,7 +393,25 @@ export class MinimapPane implements Component {
     const entryIndexes = new Map(
       entries.map((entry, index) => [entry.id, index]),
     );
-    return { entries, stats, context, resets, entryIndexes };
+    const previousThrough = this.state.open?.throughEntryId ?? this.state.steps.at(-1)?.throughEntryId;
+    const pending = entriesAfter(entries, previousThrough);
+    // Consumed steering is visible before its turn-end checkpoint.
+    const latestUser = pending.reduce((latest, entry, index) => entry.type === "message" &&
+      entry.message.role === "user" && !isStandaloneSkillInjection(textContent(entry.message.content))
+      ? index : latest, -1);
+    const awaitingUser = this.state.current?.previewingTask &&
+      !entriesAfter(entries, this.state.current.userAfterEntryId).some((entry) =>
+        entry.type === "message" && entry.message.role === "user");
+    const open = latestUser < 0 && !awaitingUser ? this.state.open : undefined;
+    const pendingStats = collectStepStats(this.state.current?.label && !awaitingUser
+      ? pending.slice(Math.max(0, latestUser)) : []);
+    const liveTools = Object.assign(emptyCounts(), open?.tools);
+    for (const [name, count] of Object.entries(pendingStats.tools))
+      liveTools[name] = (liveTools[name] ?? 0) + count;
+    const liveUsage = { ...(open?.usage ?? emptyUsage()) };
+    addUsage(liveUsage, pendingStats.usage);
+    const liveErrors = (open?.errors ?? 0) + pendingStats.errors;
+    return { entries, stats, context, resets, entryIndexes, liveTools, liveUsage, liveErrors };
   }
 
   private renderExpanded(width: number): string[] {
@@ -417,7 +440,7 @@ export class MinimapPane implements Component {
         .join("  ");
     };
 
-    const { entries, stats, context, resets, entryIndexes } =
+    const { entries, stats, context, resets, entryIndexes, liveTools, liveUsage, liveErrors } =
       this.sessionData();
     const efficiency = sessionEfficiency(entries, stats);
     const review = failureReview(entries, stats.tools);
@@ -426,18 +449,6 @@ export class MinimapPane implements Component {
     const liveEntries = entries.slice(lastBoundary + 1);
     const failureStreak = trailingFailureStreak(liveEntries);
     const liveSummary = this.state.current?.label;
-    const previousThrough =
-      this.state.open?.throughEntryId ??
-      this.state.steps.at(-1)?.throughEntryId;
-    const pendingStats = collectStepStats(
-      liveSummary ? entriesAfter(entries, previousThrough) : [],
-    );
-    const liveTools = Object.assign(emptyCounts(), this.state.open?.tools);
-    for (const [name, count] of Object.entries(pendingStats.tools))
-      liveTools[name] = (liveTools[name] ?? 0) + count;
-    const liveUsage = { ...(this.state.open?.usage ?? emptyUsage()) };
-    addUsage(liveUsage, pendingStats.usage);
-    const liveErrors = (this.state.open?.errors ?? 0) + pendingStats.errors;
     const liveCalls = Object.values(liveTools).reduce(
       (sum, count) => sum + count,
       0,
@@ -486,7 +497,7 @@ export class MinimapPane implements Component {
       );
       header.push(
         ...wrappedRows(
-          ` ${status === "active" ? "●" : "✓"} Current ${this.state.steps.length + 1} · `,
+          ` ${status === "active" ? "●" : "✓"} Current ${this.state.steps.length + 1} · ${titleBadge(this.state.current?.evidence)}`,
           readableGoal(liveSummary),
           (value) => th.fg(status === "active" ? "accent" : "success", value),
           (value) => th.bold(th.fg("text", value)),
@@ -557,9 +568,10 @@ export class MinimapPane implements Component {
       tools: Record<string, number>,
       usage: UsageSnapshot,
       errors: number,
+      evidence: TitleEvidence | undefined,
     ) => {
       cardStarts.push(history.length);
-      const lines = wrapStepSummary(conciseStep(summary), goalWidth);
+      const lines = wrapStepSummary(`${titleBadge(evidence)}${conciseStep(summary)}`, goalWidth);
       const contextLabel = `${meterBar(end?.percent, 100, 6)} ${dashboardContextLabel(start?.percent, end?.percent, stepResets)}`;
       const stepCalls = Object.values(tools).reduce(
         (sum, count) => sum + count,
@@ -584,10 +596,9 @@ export class MinimapPane implements Component {
     };
 
     let previousBoundary = -1;
-    const settledSteps =
-      !this.state.current && this.state.open
-        ? [...this.state.steps, this.state.open]
-        : this.state.steps;
+    const settledSteps = this.state.open
+      ? [...this.state.steps, this.state.open]
+      : this.state.steps;
     for (let index = 0; index < settledSteps.length; index++) {
       const step = settledSteps[index];
       if (!step) continue;
@@ -607,6 +618,7 @@ export class MinimapPane implements Component {
         step.tools,
         step.usage,
         step.errors,
+        step.evidence,
       );
       previousBoundary = Math.max(previousBoundary, endBoundary);
     }
@@ -797,27 +809,27 @@ export class MinimapPane implements Component {
       return "";
     };
 
-    const { stats, context, resets, entryIndexes } = this.sessionData();
+    const { stats, context, resets, entryIndexes, liveTools, liveErrors } = this.sessionData();
     const history: string[] = [];
     const cardStarts: number[] = [];
     let previousBoundary = -1;
-    const settledSteps =
-      !this.state.current && this.state.open
-        ? [...this.state.steps, this.state.open]
-        : this.state.steps;
+    const settledSteps = this.state.open
+      ? [...this.state.steps, this.state.open]
+      : this.state.steps;
     for (let index = 0; index < settledSteps.length; index++) {
       const step = settledSteps[index];
       if (!step) continue;
       cardStarts.push(history.length);
-      const prefix = ` ${index + 1}. `;
+      const prefix = ` ${index + 1}. ${titleBadge(step.evidence)}`;
+      const prefixWidth = visibleWidth(prefix);
       const wrapped = wrapStepSummary(
         conciseStep(step.summary),
-        inner - prefix.length,
+        inner - prefixWidth,
       );
       for (let line = 0; line < wrapped.length; line++)
         history.push(
           row(
-            `${line === 0 ? th.fg("accent", prefix) : " ".repeat(prefix.length)}${th.bold(th.fg("text", wrapped[line] ?? ""))}`,
+            `${line === 0 ? th.fg("accent", prefix) : " ".repeat(prefixWidth)}${th.bold(th.fg("text", wrapped[line] ?? ""))}`,
           ),
         );
       const endBoundary =
@@ -847,7 +859,7 @@ export class MinimapPane implements Component {
     }
 
     const activity = this.state.current
-      ? topCounts(this.state.current.tools, 2)
+      ? topCounts(liveTools, 2)
       : "";
     const openResets = resets.filter(
       (reset) => reset.entryIndex > previousBoundary,
@@ -879,7 +891,7 @@ export class MinimapPane implements Component {
     if (liveSummary) {
       header.push(
         ...wrappedRows(
-          status === "active" ? " ● Current · " : " ✓ Current · ",
+          `${status === "active" ? " ● Current · " : " ✓ Current · "}${titleBadge(this.state.current?.evidence)}`,
           readableGoal(liveSummary),
           (value) => th.fg(status === "active" ? "accent" : "success", value),
           (value) => th.bold(th.fg("text", value)),
@@ -889,8 +901,8 @@ export class MinimapPane implements Component {
         range,
         resetCountLabel(openResets),
         activity ? `working · ${activity}` : "",
-        this.state.current?.errors
-          ? `${this.state.current.errors} step failures`
+        liveErrors
+          ? `${liveErrors} step failures`
           : "",
       ]
         .filter(Boolean)

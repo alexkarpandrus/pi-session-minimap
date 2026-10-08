@@ -8,6 +8,7 @@ import {
   STATE_ENTRY_TYPE,
   STEP_VERSION,
   emptyCounts,
+  addUsage,
   emptyUsage,
   entriesAfter,
   restoreSavedState,
@@ -16,11 +17,13 @@ import {
   type ContextSnapshot,
   type MinimapStateData,
   type TailSource,
+  type TitleEvidence,
   type ViewState,
 } from "./minimap/state.ts";
 import {
   isStandaloneSkillInjection,
   readableGoal,
+  requestText,
   oneLine,
   textContent,
 } from "./minimap/diagnostics.ts";
@@ -29,12 +32,14 @@ import {
   type MilestoneBoundaryDecision,
 } from "./minimap/jev.ts";
 import {
+  LIVE_DIRECTION_SYSTEM_PROMPT,
   MAX_PENDING_SOURCES,
   MAX_TRANSCRIPT_CHARS,
   SUMMARY_SYSTEM_PROMPT,
   SUMMARY_TIMEOUT_MS,
   buildTranscript,
   parseTailPlan,
+  evidenceForEntries,
   reconcileTail,
   splitPendingActivity,
 } from "./minimap/summary.ts";
@@ -78,6 +83,7 @@ export {
 } from "./minimap/pane.ts";
 
 export default function minimapExtension(pi: ExtensionAPI) {
+  const promptLabel = (text: string) => readableGoal(requestText(text)) || "User request";
   const state: ViewState = { steps: [], open: undefined, current: undefined };
   let overlay: OverlayHandle | undefined;
   let pane: MinimapPane | undefined;
@@ -86,13 +92,22 @@ export default function minimapExtension(pi: ExtensionAPI) {
   let summaryRunning = false;
   let summaryPending = false;
   let summaryAbort: AbortController | undefined;
+  let directionAbort: AbortController | undefined;
+  let directionPending = false;
+  let resumeDirectionAfterSummary: (() => void) | undefined;
+  let directionThroughEntryId: string | undefined;
   let branchGeneration = 0;
   let runContextStart: ContextSnapshot | undefined;
   let expanded = false;
   let streamingActivity = false;
   let paneContext: ExtensionContext | undefined;
   let pendingPersistence:
-    | { generation: number; data: MinimapStateData }
+    | {
+        generation: number;
+        data: MinimapStateData;
+        current: ViewState["current"];
+        direction?: { throughEntryId: string | undefined; label: string | undefined; evidence?: TitleEvidence } | undefined;
+      }
     | undefined;
 
   const snapshotContext = (ctx: ExtensionContext): ContextSnapshot => {
@@ -142,6 +157,215 @@ export default function minimapExtension(pi: ExtensionAPI) {
         else mutableSessionManager.resetLeaf();
       }
       throw error;
+    }
+  };
+
+  const flushPersistence = (ctx: ExtensionContext) => {
+    const pending = pendingPersistence;
+    if (!pending) return;
+    if (pending.generation !== branchGeneration) {
+      pendingPersistence = undefined;
+      return;
+    }
+    appendPersistedState(ctx, pending.data);
+    if (pending.data.revision) {
+      const { replaceCount, steps } = pending.data.revision;
+      state.steps.splice(state.steps.length - replaceCount, replaceCount, ...steps);
+      state.open = pending.data.open;
+    }
+    if (pending.direction) {
+      directionThroughEntryId = pending.direction.throughEntryId;
+      if (state.current && state.current === pending.current) {
+        state.current.needsTitle = false;
+        if (pending.direction.label) state.current.label = pending.direction.label;
+        if (pending.direction.evidence) state.current.evidence = pending.direction.evidence;
+      }
+    }
+    pendingPersistence = undefined;
+    if (pending.data.revision || pending.direction?.label) requestRender();
+  };
+
+  const persist = (
+    ctx: ExtensionContext,
+    data: MinimapStateData,
+    direction?: { throughEntryId: string | undefined; label: string | undefined; evidence?: TitleEvidence },
+  ) => {
+    if (pendingPersistence?.generation === branchGeneration && data.usageOnly) {
+      addUsage(pendingPersistence.data.callUsage, data.callUsage);
+      flushPersistence(ctx);
+      return;
+    }
+    if (pendingPersistence?.generation === branchGeneration)
+      addUsage(data.callUsage, pendingPersistence.data.callUsage);
+    pendingPersistence = { generation: branchGeneration, data, direction, current: state.current };
+    flushPersistence(ctx);
+  };
+
+  const startStep = (
+    ctx: ExtensionContext,
+    label: string,
+    throughEntryId: string,
+    previousThrough: string | undefined,
+    callUsage = emptyUsage(),
+    direction?: { throughEntryId: string | undefined; label: string | undefined; evidence?: TitleEvidence },
+  ) => {
+    const branch = ctx.sessionManager.getBranch();
+    const now = snapshotContext(ctx);
+    const start = direction ? now : (runContextStart ?? now);
+    const sources: TailSource[] = [
+      ...(state.open
+        ? [{ ...state.open, throughEntryId: previousThrough ?? state.open.throughEntryId, contextEnd: start }]
+        : []),
+      {
+        throughEntryId, decisions: [], contextStart: start, contextEnd: now,
+        createdAt: Date.parse(branch.find((entry) => entry.id === throughEntryId)!.timestamp),
+        evidence: direction ? "agent" : "user",
+      },
+    ];
+    const { completed, open } = reconcileTail(
+      branch, state.steps.at(-1)?.throughEntryId, sources,
+      {
+        groups: [
+          ...(state.open ? [{ sources: ["CURRENT"], summary: state.open.summary }] : []),
+          { sources: ["NEW"], summary: label },
+        ],
+        decisions: [],
+      },
+    );
+    persist(ctx, {
+      version: STEP_VERSION, revision: { replaceCount: 0, steps: completed }, open, callUsage,
+    }, direction);
+  };
+
+  const captureSteering = (ctx: ExtensionContext) => {
+    flushPersistence(ctx);
+    const branch = ctx.sessionManager.getBranch();
+    const pending = entriesAfter(branch, state.open?.throughEntryId ?? state.steps.at(-1)?.throughEntryId);
+    for (const [index, entry] of pending.entries()) {
+      if (entry.type !== "message" || entry.message.role !== "user") continue;
+      const text = textContent(entry.message.content);
+      if (isStandaloneSkillInjection(text)) continue;
+      const label = promptLabel(text);
+      const previous = pending[index - 1] ?? branch[branch.indexOf(entry) - 1];
+      startStep(ctx, label, entry.id, previous?.id);
+      directionThroughEntryId = entry.id;
+    }
+  };
+
+  const cancelDirectionUpdate = () => {
+    directionAbort?.abort();
+    directionAbort = undefined;
+    directionPending = false;
+    resumeDirectionAfterSummary = undefined;
+    directionThroughEntryId = undefined;
+  };
+
+  const updateLiveDirection = async (ctx: ExtensionContext): Promise<void> => {
+    const current = state.current;
+    if (ctx.mode !== "tui" || !current) return;
+    // Dispatch can await later rewrites; only the final persisted user owns task evidence.
+    const consumed = current.awaitingUser
+      ? entriesAfter(ctx.sessionManager.getBranch(), current.userAfterEntryId).flatMap((entry) =>
+        entry.type === "message" && entry.message.role === "user" ? [entry.message] : []).at(0)
+      : undefined;
+    if (current.awaitingUser && !consumed) return;
+    if (directionAbort) {
+      directionPending = true;
+      return;
+    }
+    try { captureSteering(ctx); } catch {
+      if (ctx.hasUI) ctx.ui.notify("Minimap checkpoint failed; persistence will retry before another model call", "warning");
+      return;
+    }
+    if (consumed) {
+      const text = textContent(consumed.content);
+      const injection = isStandaloneSkillInjection(text);
+      current.request = requestText(text);
+      current.label = injection ? state.open?.summary ?? promptLabel(text) : promptLabel(text);
+      current.evidence = injection ? state.open?.evidence : "user";
+      current.needsTitle = !injection || !state.open;
+      current.awaitingUser = false;
+      current.previewingTask = false;
+    }
+    if (summaryRunning) {
+      const generation = branchGeneration;
+      resumeDirectionAfterSummary = () => {
+        if (generation === branchGeneration && state.current === current) void updateLiveDirection(ctx);
+      };
+      return;
+    }
+    if (!ctx.model) return;
+    const pending = entriesAfter(
+      ctx.sessionManager.getBranch(), directionThroughEntryId,
+    );
+    const throughEntryId = pending.at(-1)?.id;
+    const transcript = buildTranscript(pending, MAX_TRANSCRIPT_CHARS, "live");
+    if (!transcript && (!current.needsTitle || !readableGoal(current.request ?? ""))) {
+      directionThroughEntryId = throughEntryId ?? directionThroughEntryId;
+      return;
+    }
+    const generation = branchGeneration;
+    const controller = new AbortController();
+    directionAbort = controller;
+    try {
+      const response = await ctx.modelRegistry.complete(
+        ctx.model,
+        {
+          systemPrompt: LIVE_DIRECTION_SYSTEM_PROMPT,
+          messages: [
+            {
+              role: "user",
+              content: [{
+                type: "text",
+                text: `CURRENT MILESTONE: ${current.label}\n\nUSER REQUEST:\n${current.evidence === "agent" ? "" : current.request?.slice(0, MAX_TRANSCRIPT_CHARS / 3) ?? ""}\n\nPUBLIC ACTIVITY:\n${transcript}`,
+              }],
+              timestamp: Date.now(),
+            },
+          ],
+        },
+        {
+          cacheRetention: "none",
+          maxTokens: 256,
+          timeoutMs: SUMMARY_TIMEOUT_MS,
+          signal: controller.signal,
+        },
+      );
+      if (generation !== branchGeneration) return;
+      const callUsage = usageSnapshot(response.usage);
+      // A stale title does not invalidate billed usage from the same branch.
+      if (controller.signal.aborted || state.current !== current) {
+        persist(ctx, { version: STEP_VERSION, usageOnly: true, callUsage });
+        return;
+      }
+      const text = textContent(response.content).trim();
+      const refining = /^STEP\s+CURRENT\s*\|/i.test(text);
+      const plan = response.stopReason !== "error" && response.stopReason !== "aborted"
+        ? parseTailPlan(text, [refining ? "CURRENT" : "NEW"]) : undefined;
+      const valid = text === "UNCHANGED" || (plan && !plan.decisions.length && (refining || Boolean(transcript)));
+      const label = valid && (refining || plan?.groups[0]?.summary !== current.label) ? plan?.groups[0]?.summary : undefined;
+      const evidence: TitleEvidence = refining ? (transcript ? (current.evidence === "user" || current.evidence === "both" ? "both" : "agent") : current.evidence ?? "user") : "agent";
+      const direction = valid ? { throughEntryId: throughEntryId ?? directionThroughEntryId, label, ...(label ? { evidence } : {}) } : undefined;
+      if (label && refining && state.open) {
+        const { open } = reconcileTail(ctx.sessionManager.getBranch(), state.steps.at(-1)?.throughEntryId,
+          [{ ...state.open, throughEntryId: throughEntryId ?? state.open.throughEntryId, contextEnd: snapshotContext(ctx), evidence }],
+          { groups: [{ sources: ["CURRENT"], summary: label }], decisions: [] });
+        persist(ctx, { version: STEP_VERSION, revision: { replaceCount: 0, steps: [] }, open, callUsage }, direction);
+      } else if (label && label !== current.label && throughEntryId) {
+        startStep(ctx, label, throughEntryId, directionThroughEntryId, callUsage, direction);
+      } else {
+        persist(ctx, { version: STEP_VERSION, usageOnly: true, callUsage }, direction);
+      }
+    } catch {
+      if (pendingPersistence && ctx.hasUI)
+        ctx.ui.notify("Minimap checkpoint failed; persistence will retry before another model call", "warning");
+    } finally {
+      if (directionAbort === controller) {
+        directionAbort = undefined;
+        if (directionPending) {
+          directionPending = false;
+          void updateLiveDirection(ctx);
+        }
+      }
     }
   };
 
@@ -195,22 +419,12 @@ export default function minimapExtension(pi: ExtensionAPI) {
       return false;
     }
     const generation = branchGeneration;
-    if (pendingPersistence) {
-      if (pendingPersistence.generation !== generation) {
-        pendingPersistence = undefined;
-      } else {
-        appendPersistedState(ctx, pendingPersistence.data);
-        pendingPersistence = undefined;
-        restore(ctx);
-        state.current = undefined;
-        requestRender();
-      }
-    }
+    captureSteering(ctx);
     if (!ctx.model) return false;
     const branch = ctx.sessionManager.getBranch();
     let openAtStart = state.open;
-    const recentSteps = state.steps.slice(-5);
-    const settledPrefixCount = state.steps.length - recentSteps.length;
+    const checkpointOpen = state.open;
+    const settledPrefixCount = state.steps.length;
     const previousThrough =
       openAtStart?.throughEntryId ?? state.steps.at(-1)?.throughEntryId;
     let pendingSegments = splitPendingActivity(
@@ -233,7 +447,6 @@ export default function minimapExtension(pi: ExtensionAPI) {
       newSegments.length === 1 ? "NEW" : `N${index + 1}`,
     );
     const sourceIds = [
-      ...recentSteps.map((_step, index) => `S${index + 1}`),
       ...(openAtStart ? ["CURRENT"] : []),
       ...newSourceIds,
     ];
@@ -244,11 +457,13 @@ export default function minimapExtension(pi: ExtensionAPI) {
         previousCurrent?.label ??
         openAtStart?.summary ??
         "Updating session map",
+      evidence: previousCurrent?.evidence ?? openAtStart?.evidence,
       tools: previousCurrent?.tools ?? emptyCounts(),
       errors: previousCurrent?.errors ?? 0,
       phase: { label: "Updating milestones", startedAt: Date.now() },
       activity: previousCurrent?.activity ?? [],
     };
+    const summaryCurrent = state.current;
     requestRender();
 
     let plan: ReturnType<typeof parseTailPlan>;
@@ -286,10 +501,6 @@ export default function minimapExtension(pi: ExtensionAPI) {
       if (boundaryDecision === "merge" && current) {
         plan = {
           groups: [
-            ...recentSteps.map((step, index) => ({
-              sources: [`S${index + 1}`],
-              summary: step.summary,
-            })),
             {
               sources: ["CURRENT", ...newSourceIds],
               summary: current.summary,
@@ -300,7 +511,6 @@ export default function minimapExtension(pi: ExtensionAPI) {
       } else {
         const prompt = [
           "ORDERED SOURCES:",
-          ...recentSteps.map((step, index) => `S${index + 1}: ${step.summary}`),
           ...(current ? [`CURRENT: ${current.summary}`] : []),
           ...(current?.decisions.length
             ? [
@@ -357,13 +567,18 @@ export default function minimapExtension(pi: ExtensionAPI) {
       if (summaryAbort === controller) summaryAbort = undefined;
     }
     if (generation !== branchGeneration) {
-      state.current = undefined;
+      if (state.current === summaryCurrent) state.current = undefined;
       summaryRunning = false;
       requestRender();
       return false;
     }
+    if (state.current !== summaryCurrent || state.open !== checkpointOpen || state.steps.length !== settledPrefixCount) {
+      persist(ctx, { version: STEP_VERSION, usageOnly: true, callUsage });
+      summaryRunning = false;
+      return false;
+    }
     if (!plan) {
-      appendPersistedState(ctx, {
+      persist(ctx, {
         version: STEP_VERSION,
         callUsage,
         usageOnly: true,
@@ -391,7 +606,6 @@ export default function minimapExtension(pi: ExtensionAPI) {
       now;
     const createdAt = Date.now();
     const sources: TailSource[] = [
-      ...recentSteps,
       ...(openAtStart ? [openAtStart] : []),
       ...newSegments.map((segment, index) => {
         const last = segment.filter((entry) => !stateFromEntry(entry)).at(-1);
@@ -403,6 +617,7 @@ export default function minimapExtension(pi: ExtensionAPI) {
         return {
           throughEntryId: last.id,
           decisions: [],
+          evidence: evidenceForEntries(segment),
           contextStart: isLast ? runStart : unknownContext,
           contextEnd: isLast ? now : unknownContext,
           createdAt: Number.isFinite(sourceCreatedAt)
@@ -420,20 +635,12 @@ export default function minimapExtension(pi: ExtensionAPI) {
       version: STEP_VERSION,
       open,
       revision: {
-        replaceCount: recentSteps.length,
+        replaceCount: 0,
         steps: completed,
       },
       callUsage,
     };
-    try {
-      appendPersistedState(ctx, data);
-    } catch (error) {
-      pendingPersistence = { generation, data };
-      runContextStart = undefined;
-      throw error;
-    }
-    state.steps.splice(settledPrefixCount, recentSteps.length, ...completed);
-    state.open = open;
+    persist(ctx, data);
     state.current = undefined;
     runContextStart = undefined;
     summaryRunning = false;
@@ -447,7 +654,8 @@ export default function minimapExtension(pi: ExtensionAPI) {
     try {
       while (true) {
         const mapped = await updateSemanticMap(ctx);
-        if (summaryPending && !summaryRunning) {
+        // A live/preflight Current owns request; SDK isIdle is still true before the prompt starts.
+        if (summaryPending && !summaryRunning && ctx.isIdle() && state.current?.request === undefined) {
           summaryPending = false;
           continue;
         }
@@ -456,7 +664,7 @@ export default function minimapExtension(pi: ExtensionAPI) {
     } catch {
       summaryRunning = false;
       summaryPending = false;
-      state.current = undefined;
+      if (ctx.isIdle()) state.current = undefined;
       restore(ctx);
       requestRender();
       if (ctx.hasUI)
@@ -465,6 +673,12 @@ export default function minimapExtension(pi: ExtensionAPI) {
           "warning",
         );
       return false;
+    } finally {
+      if (!summaryRunning) {
+        const resume = resumeDirectionAfterSummary;
+        resumeDirectionAfterSummary = undefined;
+        resume?.();
+      }
     }
   };
 
@@ -498,6 +712,7 @@ export default function minimapExtension(pi: ExtensionAPI) {
 
   pi.on("session_start", (_event, ctx) => {
     branchGeneration++;
+    cancelDirectionUpdate();
     restore(ctx);
     openPane(ctx);
     requestRender();
@@ -505,13 +720,19 @@ export default function minimapExtension(pi: ExtensionAPI) {
   });
 
   pi.on("before_agent_start", (event, ctx) => {
-    runContextStart ??= snapshotContext(ctx);
+    cancelDirectionUpdate();
+    directionThroughEntryId = ctx.sessionManager.getBranch().at(-1)?.id;
+    runContextStart = snapshotContext(ctx);
     streamingActivity = false;
+    const injection = isStandaloneSkillInjection(event.prompt);
     state.current = {
-      label:
-        readableGoal(event.prompt) ||
-        state.open?.summary ||
-        "Starting semantic step",
+      label: injection ? state.open?.summary ?? promptLabel(event.prompt) : promptLabel(event.prompt),
+      evidence: injection ? state.open?.evidence : "user",
+      request: requestText(event.prompt),
+      needsTitle: !injection || !state.open,
+      previewingTask: !injection,
+      userAfterEntryId: directionThroughEntryId,
+      awaitingUser: true,
       tools: emptyCounts(),
       errors: 0,
       phase: { label: "Starting", startedAt: Date.now() },
@@ -520,10 +741,11 @@ export default function minimapExtension(pi: ExtensionAPI) {
     requestRender();
   });
 
-  pi.on("message_start", (event) => {
+  pi.on("message_start", (event, ctx) => {
     if (event.message.role !== "assistant") return;
     streamingActivity = false;
     updateActivity("Generating response");
+    if (state.current?.awaitingUser || state.current?.needsTitle) void updateLiveDirection(ctx);
   });
 
   pi.on("message_update", (event) => {
@@ -568,12 +790,35 @@ export default function minimapExtension(pi: ExtensionAPI) {
     updateActivity(activity, activity);
   });
 
-  pi.on("message_end", (event) => {
+  pi.on("message_end", (event, ctx) => {
+    if (event.message.role === "user") {
+      const checkedThrough = directionThroughEntryId;
+      cancelDirectionUpdate();
+      // Cancel the request, not the accepted evidence cursor: context arrivals are not task boundaries.
+      directionThroughEntryId = checkedThrough;
+      runContextStart = snapshotContext(ctx);
+      if (state.current) {
+        state.current = { ...state.current,
+          userAfterEntryId: ctx.sessionManager.getBranch().at(-1)?.id, awaitingUser: true };
+        // Keep the current task until dispatch finishes and the final message is persisted.
+        const current = state.current;
+        const generation = branchGeneration;
+        setImmediate(() => { if (generation === branchGeneration && state.current === current && current.awaitingUser) void updateLiveDirection(ctx); });
+      }
+    }
     if (event.message.role === "assistant") {
       if (event.message.stopReason === "aborted") updateActivity("Aborted");
       else if (event.message.stopReason === "error") updateActivity("Response failed");
     }
     requestRender();
+  });
+  pi.on("turn_end", (event, ctx) => {
+    try { captureSteering(ctx); } catch {
+      if (ctx.hasUI) ctx.ui.notify("Minimap checkpoint failed; it will retry after the next turn", "warning");
+      return;
+    }
+    if (event.message.role !== "assistant") return;
+    void updateLiveDirection(ctx);
   });
   pi.on("session_compact", (_event, _ctx) => requestRender());
   pi.on("model_select", async (_event, ctx) => {
@@ -583,6 +828,7 @@ export default function minimapExtension(pi: ExtensionAPI) {
 
   pi.on("agent_settled", async (_event, ctx) => {
     if (!ctx.isIdle()) return;
+    cancelDirectionUpdate();
     let mapped = false;
     try {
       mapped = await reconcileSemanticMap(ctx);
@@ -595,6 +841,7 @@ export default function minimapExtension(pi: ExtensionAPI) {
 
   pi.on("session_tree", async (_event, ctx) => {
     branchGeneration++;
+    cancelDirectionUpdate();
     summaryAbort?.abort();
     summaryAbort = undefined;
     restore(ctx);
@@ -606,6 +853,7 @@ export default function minimapExtension(pi: ExtensionAPI) {
 
   pi.on("session_shutdown", () => {
     branchGeneration++;
+    cancelDirectionUpdate();
     summaryAbort?.abort();
     summaryAbort = undefined;
     closePane?.();

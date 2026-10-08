@@ -42,7 +42,11 @@ The compact pane opens automatically in interactive terminals at least 110 colum
 
 The current goal, session totals, context state, and recent history stay beside the conversation.
 
-The live trail shows the current activity and its elapsed time, plus the latest three public assistant updates or tool events. It updates as the agent streams, without extra model calls. Thinking shows status, not private reasoning text. The trail is temporary; semantic history still updates after each settled run.
+The live trail shows the current activity and its elapsed time, plus the latest three public assistant updates or tool events. It updates as the agent streams, without extra model calls. Thinking shows status, not private reasoning text.
+
+Current starts with a readable local label. A background check summarizes the consumed user request into a concise task title, even before the agent acts. Checks after completed assistant turns, with or without tools, can refine that title without adding a row. A significant public direction change adds a milestone; routine progress, retries, and phase changes do not. Only the latest title can settle at handback; previous rows stay visible. Checks use the selected pi model, add to minimap token costs, and coalesce new activity while a check is in flight. They do not read private reasoning or run per token.
+
+Title badges show inference evidence: `👤` user request, `🤖` public agent activity, `🔗` both. Rephrasing a user request remains `👤`; agent-informed refinement becomes `🔗`. Older records without stored evidence show no badge.
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/alexkarpandrus/pi-session-minimap/main/assets/compact.png" width="600" alt="Compact pi session minimap showing the current goal, context history, session cost, and completed goals">
@@ -69,9 +73,11 @@ The dashboard adds a five-column timeline, nested tool tokens, invoked skill tot
 
 ## How semantic history works
 
-Related follow-ups, retries, and routine work phases stay in one milestone. A new milestone starts only for a distinct outcome worth remembering after the surrounding conversation is gone.
+Each consumed user prompt starts an entry, including steering inside an active run. The entry settles when control returns to the user. The agent can add intermediate milestones for significant pivots; routine work phases and retries do not add entries.
 
-After each settled run, the extension compares the open milestone with new activity. The normal summarizer can rename or merge the latest five completed milestones while older history stays fixed. A confident Jev merge extends the open milestone directly and keeps its title. Revised metrics are recomputed from their original session entries.
+Image-only and screenshot-path-only prompts start with the title `User request`. The summarizer can refine that title after observing public activity.
+
+After each settled run, the extension compares the latest milestone with new activity. The summarizer can refine its title or add distinct outcomes, but it cannot merge away previous entries. A confident Jev merge extends the latest milestone directly and keeps its title. Metrics are recomputed from their original session entries.
 
 The extension uses your selected pi model and stores compact revision metadata in the pi session file. Its summary calls use tokens from your active model provider; the minimap reports that spend separately.
 

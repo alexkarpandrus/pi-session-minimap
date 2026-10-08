@@ -6,6 +6,8 @@ import type {
   SessionEntry,
   Theme,
 } from "@earendil-works/pi-coding-agent";
+import { createExtensionRuntime, ExtensionRunner, formatDimensionNote, SessionManager } from "@earendil-works/pi-coding-agent";
+import type { UserMessage } from "@earendil-works/pi-ai";
 import {
   visibleWidth,
   type Component,
@@ -39,8 +41,9 @@ import minimapExtension, {
   trailingFailureStreak,
   wrapStepSummary,
 } from "./minimap.ts";
-import { buildTranscript, splitPendingActivity } from "./minimap/summary.ts";
+import { LIVE_DIRECTION_SYSTEM_PROMPT, buildTranscript, splitPendingActivity } from "./minimap/summary.ts";
 import { decideMilestoneBoundary } from "./minimap/jev.ts";
+import { requestText } from "./minimap/diagnostics.ts";
 
 // Lifecycle tests must not use the operator's optional paid Jev gate.
 delete process.env.PI_MINIMAP_JEV;
@@ -462,6 +465,12 @@ test("malformed persisted minimap entries are ignored", () => {
       callUsage: { ...usage(0, 0), cost: 0 },
       revision: { replaceCount: 1, steps: [] },
     }),
+    malformed("bad-evidence", "session-minimap-state", {
+      version: 1, callUsage: { ...usage(0, 0), cost: 0 }, revision: { replaceCount: 0, steps: [] },
+      open: { summary: "Invalid evidence", evidence: "unknown", throughEntryId: "user", tools: {}, decisions: [], errors: 0,
+        usage: { ...usage(0, 0), cost: 0 }, contextStart: { tokens: null, percent: null },
+        contextEnd: { tokens: null, percent: null }, createdAt: 0 },
+    }),
   ];
 
   assert.deepEqual(restoreSavedState(branch), { steps: [], open: undefined });
@@ -552,11 +561,16 @@ test("long single-prompt runs become bounded semantic sources", () => {
         ),
       ),
   );
+  assert.deepEqual(
+    splitPendingActivity(run.slice(1)).flatMap((segment) => segment.map((entry) => entry.id)),
+    run.slice(1).map((entry) => entry.id),
+  );
+  assert.deepEqual(splitPendingActivity([entries[3]!]), []);
   const transcript = segments
     .map((segment) => buildTranscript(segment, 2_000))
     .join("\n");
-  assert.match(transcript, /Progress: Phase 1 progress/);
-  assert.match(transcript, /Progress: Phase 10 progress/);
+  assert.match(transcript, /Actions: edit/);
+  assert.doesNotMatch(transcript, /Phase \d+ progress|Progress:/);
 });
 
 test("tail plans rename and merge adjacent semantic sources", () => {
@@ -792,16 +806,22 @@ test("failure labels strip terminal control strings", () => {
 });
 
 test("standalone skill injections do not start semantic steps", () => {
-  assert.equal(
-    isStandaloneSkillInjection('<skill name="cloudflare">instructions</skill>'),
-    true,
-  );
-  assert.equal(
-    isStandaloneSkillInjection(
-      '<skill name="cloudflare">instructions</skill>\nAdd email',
-    ),
-    false,
-  );
+  assert.equal(isStandaloneSkillInjection('<skill name="cloudflare">instructions</skill>'), true);
+  assert.equal(isStandaloneSkillInjection('<skill name="cloudflare">instructions</skill>\nAdd email'), false);
+  const skill = '<skill name="cloudflare" location="/x/SKILL.md">\nTreat </skill> as literal body text\n</skill>';
+  const args = "Fix skill expansion when the literal </skill> marker appears in an argument";
+  assert.equal(requestText(`${skill}\n\n${args}`), args);
+  assert.equal(isStandaloneSkillInjection(`${skill}\n\n${args}`), false);
+  const second = "<skill location='/x/tdd.md' name='tdd'>\nInstructions\n</skill>";
+  assert.equal(requestText(`${skill}\n${args}\n${second}`), `${args}\n${second}`);
+  assert.equal(isStandaloneSkillInjection(`${skill}\n${args}\n${second}`), false);
+  assert.equal(isStandaloneSkillInjection(second), true);
+  assert.equal(requestText(second), "");
+  const file = '<file name="/x/context.txt">\nInline </file> body text\n</file>';
+  const fileArgs = "Explain the literal </file> delimiter safely";
+  assert.equal(requestText(`${file}\n\n${fileArgs}`), fileArgs);
+  const exampleArgs = `Explain this skill-shaped example without deleting it:\n${second}`;
+  assert.equal(requestText(`${skill}\n\n${exampleArgs}`), exampleArgs);
 });
 
 test("live labels ignore leading and trailing screenshot paths", () => {
@@ -1121,6 +1141,8 @@ test("session_start reconciles pending activity without blocking", async () => {
       timestamp: "2026-01-01T00:00:00Z",
       message: { role: "user", content: "Restore pending work", timestamp: 1 },
     } as SessionEntry,
+    { ...entries[1], id: "pending-assistant", parentId: "pending",
+      message: { role: "assistant", content: [{ type: "text", text: "Restored pending activity" }], api: "test", provider: "test", model: "test", usage: usage(0, 0), stopReason: "stop", timestamp: 1 } } as SessionEntry,
   ];
   let resolveCompletion = (_response: Completion) => {};
   const completion = new Promise<Completion>((resolve) => {
@@ -1152,13 +1174,13 @@ test("session_start reconciles pending activity without blocking", async () => {
     appendEntry: (customType: string, data: unknown) => {
       branch.push({
         type: "custom",
-        id: "map",
+        id: `map-${branch.length}`,
         parentId: branch.at(-1)?.id ?? null,
         timestamp: "2026-01-01T00:00:01Z",
         customType,
         data,
       } as SessionEntry);
-      resolvePersistence();
+      if ((data as { callUsage: { totalTokens: number } }).callUsage.totalTokens) resolvePersistence();
     },
   } as unknown as ExtensionAPI;
 
@@ -1168,9 +1190,15 @@ test("session_start reconciles pending activity without blocking", async () => {
   assert.equal(start({}, ctx), undefined);
   assert.equal(completeCalls, 1);
 
+  handlers.get("before_agent_start")?.({ prompt: "Steer into billing recovery" }, ctx);
+  const steering = { role: "user" as const, content: "Steer into billing recovery", timestamp: 2 };
+  handlers.get("message_end")?.({ message: steering }, ctx);
+  branch.push({ type: "message", id: "steering", parentId: branch.at(-1)?.id ?? null,
+    timestamp: "2026-01-01T00:00:02Z", message: steering });
+  handlers.get("turn_end")?.({ message: { role: "assistant" }, toolResults: [] }, ctx);
   resolveCompletion({
     role: "assistant",
-    content: [{ type: "text", text: "STEP NEW | Restored pending activity" }],
+    content: [{ type: "text", text: "STEP CURRENT+NEW | Restored pending activity" }],
     api: "test",
     provider: "test",
     model: "test",
@@ -1181,11 +1209,13 @@ test("session_start reconciles pending activity without blocking", async () => {
   await persisted;
   assert.equal(
     restoreSavedState(branch).open?.summary,
-    "Restored pending activity",
+    "Steer into billing recovery",
   );
+  assert.equal(restoreSavedState(branch).steps[0]?.summary, "Restore pending work");
+  assert.equal(collectStats(branch).summaryTokens, 2);
 });
 
-test("tail reconciliation merges steps and recomputes their data", async () => {
+test("tail reconciliation preserves user boundaries and recomputes their data", async () => {
   type Handler = (event: unknown, ctx: ExtensionContext) => unknown;
   const handlers = new Map<string, Handler>();
   const user = (
@@ -1227,9 +1257,9 @@ test("tail reconciliation merges steps and recomputes their data", async () => {
     }) as SessionEntry;
 
   const plans = [
-    "STEP NEW | Investigated authentication behavior\nDECISION: Use native session storage",
-    "STEP CURRENT | Investigated authentication behavior\nSTEP NEW | Implemented authentication flow",
-    "STEP S1+CURRENT | Built authentication flow\nSTEP NEW | Verified authentication behavior",
+    "STEP CURRENT+NEW | Investigated authentication behavior\nDECISION: Use native session storage",
+    "STEP CURRENT+NEW | Implemented authentication flow",
+    "STEP CURRENT+NEW | Verified authentication behavior",
   ];
   let contextTokens = 20;
   const branch: SessionEntry[] = [
@@ -1313,43 +1343,22 @@ test("tail reconciliation merges steps and recomputes their data", async () => {
   await settle({}, ctx);
 
   const restored = restoreSavedState(branch);
-  assert.deepEqual(
-    restored.steps.map((step) => step.summary),
-    ["Built authentication flow"],
-  );
+  assert.deepEqual(restored.steps.map((step) => step.summary), [
+    "Investigated authentication behavior", "Implemented authentication flow",
+  ]);
   assert.equal(restored.open?.summary, "Verified authentication behavior");
   assert.equal(Object.hasOwn(restored.open ?? {}, "version"), false);
-  assert.deepEqual({ ...restored.steps[0]?.tools }, { read: 1, edit: 1 });
-  assert.deepEqual(restored.steps[0]?.usage, {
-    input: 30,
-    output: 5,
-    cacheRead: 0,
-    totalTokens: 35,
-    cost: 0.02,
-  });
-  assert.deepEqual(restored.steps[0]?.decisions, [
-    "Use native session storage",
-  ]);
+  assert.deepEqual(restored.steps.map((step) => ({ ...step.tools })), [{ read: 1 }, { edit: 1 }]);
+  assert.deepEqual(restored.steps.map((step) => step.usage.totalTokens), [12, 23]);
+  assert.deepEqual(restored.steps[0]?.decisions, ["Use native session storage"]);
   assert.deepEqual({ ...restored.open?.tools }, { test: 1 });
   assert.equal(restored.open?.errors, 1);
-  assert.deepEqual(restored.open?.usage, {
-    input: 35,
-    output: 5,
-    cacheRead: 0,
-    totalTokens: 40,
-    cost: 0.02,
-  });
+  assert.equal(restored.open?.usage.totalTokens, 40);
   assert.deepEqual(
-    [
-      restored.steps[0]?.contextStart?.tokens,
-      restored.steps[0]?.contextEnd?.tokens,
-    ],
+    [restored.steps[0]?.contextStart.tokens, restored.steps[0]?.contextEnd.tokens],
     [20, 40],
   );
-  assert.deepEqual(
-    [restored.open?.contextStart.tokens, restored.open?.contextEnd.tokens],
-    [40, 60],
-  );
+  assert.deepEqual([restored.open?.contextStart.tokens, restored.open?.contextEnd.tokens], [60, 60]);
 });
 test("fresh and stale history reconstruct after startup model restore", async () => {
   type Handler = (event: unknown, ctx: ExtensionContext) => unknown;
@@ -1370,6 +1379,8 @@ test("fresh and stale history reconstruct after startup model restore", async ()
       index ? `u${index}` : null,
     );
   });
+  branch.push({ ...entries[1], id: "a10", parentId: "u10",
+    message: { role: "assistant", content: [{ type: "text", text: "Completed final semantic goal" }], api: "test", provider: "test", model: "test", usage: usage(0, 0), stopReason: "stop", timestamp: 1 } } as SessionEntry);
   const prompts: string[] = [];
   let completeCalls = 0;
   let customId = 0;
@@ -1391,23 +1402,7 @@ test("fresh and stale history reconstruct after startup model restore", async ()
         const prompt = request.messages[0]?.content[0]?.text ?? "";
         prompts.push(prompt);
         completeCalls++;
-        const text =
-          completeCalls === 1
-            ? Array.from(
-                { length: 8 },
-                (_value, index) =>
-                  `STEP N${index + 1} | Completed semantic goal ${index + 1}`,
-              ).join("\n")
-            : [
-                "STEP S1 | Completed semantic goal 3",
-                "STEP S2 | Completed semantic goal 4",
-                "STEP S3 | Completed semantic goal 5",
-                "STEP S4 | Completed semantic goal 6",
-                "STEP S5 | Completed semantic goal 7",
-                "STEP CURRENT | Completed semantic goal 8",
-                "STEP N1 | Completed semantic goal 9",
-                "STEP N2 | Completed semantic goal 10",
-              ].join("\n");
+        const text = "STEP CURRENT+NEW | Completed semantic goal 10";
         return {
           role: "assistant" as const,
           content: [{ type: "text" as const, text }],
@@ -1454,19 +1449,17 @@ test("fresh and stale history reconstruct after startup model restore", async ()
   assert.equal(completeCalls, 1);
   await handlers.get("model_select")?.({}, ctx);
 
-  assert.equal(completeCalls, 2);
+  assert.equal(completeCalls, 1);
   assert.ok(prompts.every((prompt) => prompt.length < 20_000));
   assert.doesNotMatch(prompts.join("\n"), /activity below|NEW ACTIVITY:/);
-  assert.match(prompts.join("\n"), /SOURCE KIND: user-steered run start/);
-  assert.equal(prompts[0]?.match(/^N8:/gm)?.length, 1);
-  assert.doesNotMatch(prompts[0] ?? "", /^N9:/m);
-  assert.equal(prompts[1]?.match(/^N2:/gm)?.length, 1);
+  assert.match(prompts[0] ?? "", /SOURCE KIND: agent-directed continuation/);
+  assert.doesNotMatch(prompts[0] ?? "", /^S\d+:/m);
   const restored = restoreSavedState(branch);
   assert.deepEqual(
     restored.steps.map((step) => step.summary),
     Array.from(
       { length: 9 },
-      (_value, index) => `Completed semantic goal ${index + 1}`,
+      (_value, index) => readableGoal(`Goal ${index + 1} ${"x".repeat(5_000)}`),
     ),
   );
   assert.equal(restored.open?.summary, "Completed semantic goal 10");
@@ -1474,7 +1467,7 @@ test("fresh and stale history reconstruct after startup model restore", async ()
     restored.steps.map((step) => step.throughEntryId),
     Array.from({ length: 9 }, (_value, index) => `u${index + 1}`),
   );
-  assert.equal(restored.open?.throughEntryId, "u10");
+  assert.equal(restored.open?.throughEntryId, "a10");
 });
 
 test("lifecycle reconciles on settlement and recovers update failures", async () => {
@@ -1498,7 +1491,7 @@ test("lifecycle reconciles on settlement and recovers update failures", async ()
     model: "test",
     usage: usage(1, 1),
     stopReason,
-    errorMessage: stopReason === "error" ? "provider failed" : undefined,
+    ...(stopReason === "error" ? { errorMessage: "provider failed" } : {}),
     timestamp: 1,
   });
   type Handler = (event: unknown, ctx: ExtensionContext) => unknown;
@@ -1549,17 +1542,17 @@ test("lifecycle reconciles on settlement and recovers update failures", async ()
         completionOptions.push(args[2]);
         completeCalls++;
         if (completeCalls === 1) return firstResponse;
-        if (completeCalls === 2) return completion("STEP NEW | Branch B");
+        if (completeCalls === 2) return completion("STEP CURRENT+NEW | Branch B");
         if (completeCalls === 3) return completion("", "error");
         const lastSourceId = branch
-          .filter((entry) => entry.type !== "custom")
+          .filter((entry) => entry.type === "message" && entry.message.role === "user")
           .at(-1)?.id;
         if (lastSourceId === "b5") return shutdownResponse;
         if (lastSourceId === "b4")
           return completion(
-            "STEP CURRENT | Branch B recovered\nSTEP NEW | Branch B caught up",
+            "STEP CURRENT+NEW | Branch B caught up",
           );
-        return completion("STEP CURRENT+N1+N2 | Branch B recovered");
+        return completion("STEP CURRENT+NEW | Branch B recovered");
       },
     },
     getContextUsage: () => ({
@@ -1583,7 +1576,7 @@ test("lifecycle reconciles on settlement and recovers update failures", async ()
         data,
       } as SessionEntry;
       branch.push(entry);
-      if (failAppend) {
+      if (failAppend && (data as { callUsage: { totalTokens: number } }).callUsage.totalTokens) {
         failAppend = false;
         throw new Error("persistence failed");
       }
@@ -1594,10 +1587,22 @@ test("lifecycle reconciles on settlement and recovers update failures", async ()
   minimapExtension(pi);
   assert.ok(commands.includes("minimap"));
   const beforeStart = handlers.get("before_agent_start");
-  const settle = handlers.get("agent_settled");
-  const switchTree = handlers.get("session_tree");
+  const addAssistant = () => {
+    const last = branch.at(-1);
+    if (last?.type !== "message" || last.message.role !== "user") return;
+    branch.push({ ...last, id: `${last.id}-assistant`, parentId: last.id,
+      message: completion("Finished branch work") });
+  };
+  const settle = (event: unknown, context: ExtensionContext) => {
+    if (idle) addAssistant();
+    return handlers.get("agent_settled")?.(event, context);
+  };
+  const switchTree = (event: unknown, context: ExtensionContext) => {
+    addAssistant();
+    return handlers.get("session_tree")?.(event, context);
+  };
   const shutdown = handlers.get("session_shutdown");
-  assert.ok(beforeStart && settle && switchTree && shutdown);
+  assert.ok(beforeStart && handlers.has("agent_settled") && handlers.has("session_tree") && shutdown);
 
   beforeStart({ prompt: "Work on branch A" }, ctx);
   await settle({}, ctx);
@@ -1630,8 +1635,10 @@ test("lifecycle reconciles on settlement and recovers update failures", async ()
     (completionOptions[0] as { signal: AbortSignal }).signal.aborted,
     true,
   );
-  assert.ok(appended.every((entry) => entry.branch === "B"));
-  assert.equal(JSON.stringify(appended).includes("Branch A"), false);
+  const billed = appended.filter((entry) =>
+    (entry.data as { callUsage: { totalTokens: number } }).callUsage.totalTokens);
+  assert.ok(billed.every((entry) => entry.branch === "B"));
+  assert.equal(JSON.stringify(billed).includes("Branch A"), false);
   assert.equal(JSON.stringify(appended).includes("Branch B"), true);
 
   branch = [...branch, userEntry("b2", "Retry branch B", "b1")];
@@ -1644,8 +1651,8 @@ test("lifecycle reconciles on settlement and recovers update failures", async ()
   branch = [...branch, userEntry("b3", "Finish branch B", "b2")];
   failAppend = true;
   await settle({}, ctx);
-  assert.equal(branch.at(-1)?.id, "b3");
-  assert.deepEqual(rollbackIds, ["b3"]);
+  assert.equal(branch.at(-1)?.type, "custom");
+  assert.deepEqual(rollbackIds, [branch.at(-1)?.id]);
   assert.equal(completeCalls, 4);
   branch = [...branch, userEntry("b4", "Continue branch B", "b3")];
   contextTokens = 20;
@@ -1662,7 +1669,7 @@ test("lifecycle reconciles on settlement and recovers update failures", async ()
     true,
   );
   const recovered = restoreSavedState(branch);
-  assert.equal(recovered.open?.throughEntryId, "b4");
+  assert.equal(recovered.open?.throughEntryId, "b4-assistant");
   assert.equal(recovered.open?.contextStart.tokens, 20);
   await settle({}, ctx);
   assert.equal(completeCalls, 5);
@@ -1809,6 +1816,8 @@ test("panes render live activity during thinking and tool execution", async (t) 
 
   let now = 10_000;
   t.mock.method(Date, "now", () => now);
+  handlers.get("before_agent_start")?.({ prompt: "" }, ctx);
+  assert.match(component?.render(96).join("\n") ?? "", /User request/);
   handlers.get("before_agent_start")?.(
     { prompt: "Fix live minimap labels" },
     ctx,
@@ -1816,6 +1825,10 @@ test("panes render live activity during thinking and tool execution", async (t) 
   const active = component?.render(96) ?? [];
   assert.match(active.join("\n"), /Fix live minimap labels/);
   assert.doesNotMatch(active.join("\n"), /Starting semantic step/);
+  assert.match(active.join("\n"), /Repair authentication failure/);
+  shortcuts.get("ctrl+shift+m")?.();
+  assert.match(component?.render(96).join("\n") ?? "", /Repair authentication failure/);
+  shortcuts.get("ctrl+shift+m")?.();
 
   const render = () => component?.render(96).join("\n") ?? "";
   const stream = (assistantMessageEvent: unknown) =>
@@ -1888,4 +1901,773 @@ test("panes render live activity during thinking and tool execution", async (t) 
   assert.doesNotMatch(render(), /Live ·|PRIVATE_REASONING_SENTINEL/);
   assert.equal(completeCalls, 0);
   assert.equal(appendedEntries, 0);
+
+  const response = (value: string, stopReason: "stop" | "error" = "stop") => ({
+    role: "assistant" as const,
+    content: [{ type: "text" as const, text: value }],
+    api: "test",
+    provider: "test",
+    model: "test",
+    usage: usage(1, 1),
+    stopReason,
+    timestamp: 1,
+  });
+  const requests: Array<{
+    prompt: string;
+    systemPrompt: string;
+    signal: AbortSignal | undefined;
+    resolve: (value: ReturnType<typeof response>) => void;
+  }> = [];
+  t.mock.method(ctx.modelRegistry, "complete", (...[_model, request, options]: Parameters<ExtensionContext["modelRegistry"]["complete"]>) =>
+    new Promise<ReturnType<typeof response>>((resolve) => {
+      const message = request.messages[0] as { content: Array<{ text: string }> };
+      requests.push({
+        prompt: message.content[0]?.text ?? "",
+        systemPrompt: request.systemPrompt ?? "",
+        signal: options?.signal,
+        resolve,
+      });
+    }),
+  );
+  t.mock.method(pi, "appendEntry", (customType: string, data: unknown) => {
+    appendedEntries++;
+    branch.push({
+      type: "custom",
+      id: `live-map-${appendedEntries}`,
+      parentId: branch.at(-1)?.id ?? null,
+      timestamp: "2026-01-01T00:00:05Z",
+      customType,
+      data,
+    } as SessionEntry);
+  });
+  const settledHistory = restoreSavedState(branch);
+  const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
+  let turn = 0;
+  const addTurn = (value: string, result = "Routine tool result") => {
+    const id = `live-${++turn}`;
+    const message = {
+      ...response(value),
+      stopReason: "toolUse" as const,
+      content: [
+        { type: "thinking" as const, thinking: "**PRIVATE_REASONING_SENTINEL**" },
+        { type: "text" as const, text: value },
+        { type: "toolCall" as const, id, name: "read", arguments: { path: "authentication.ts" } },
+      ],
+    };
+    const toolResult = {
+      role: "toolResult" as const,
+      toolCallId: id,
+      toolName: "read",
+      content: [{ type: "text" as const, text: result }],
+      isError: false,
+      timestamp: 1,
+    };
+    branch.push(
+      { type: "message", id, parentId: branch.at(-1)?.id ?? null, timestamp: "2026-01-01T00:00:06Z", message },
+      { type: "message", id: `${id}-result`, parentId: id, timestamp: "2026-01-01T00:00:07Z", message: toolResult },
+    );
+    handlers.get("tool_execution_start")?.({ toolName: "read" }, ctx);
+    handlers.get("tool_execution_end")?.({ toolName: "read", isError: false }, ctx);
+    const event = { message, toolResults: [toolResult] };
+    assert.equal(handlers.get("turn_end")?.(event, ctx), undefined);
+    return event;
+  };
+  const startRun = (prompt: string) => {
+    handlers.get("before_agent_start")?.({ prompt }, ctx);
+    branch.push({ type: "message", id: `live-user-${branch.length}`, parentId: branch.at(-1)?.id ?? null,
+      timestamp: "2026-01-01T00:00:05Z", message: { role: "user", content: prompt, timestamp: 1 } });
+  };
+  startRun("Repair authentication failure");
+
+  const routine = addTurn("Checking authentication data");
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0]?.systemPrompt, LIVE_DIRECTION_SYSTEM_PROMPT);
+  assert.match(requests[0]!.prompt, /authentication\.ts/);
+  assert.match(requests[0]!.prompt, /Routine tool result/);
+  assert.doesNotMatch(requests[0]!.prompt, /PRIVATE_REASONING_SENTINEL/);
+  const rendersBeforeCheck = renderRequests;
+  requests[0]!.resolve(response("UNCHANGED"));
+  await flush();
+  assert.equal(renderRequests, rendersBeforeCheck);
+  assert.match(render(), /Repair authentication failure/);
+  assert.deepEqual(restoreSavedState(branch).steps.slice(0, settledHistory.steps.length), settledHistory.steps);
+  assert.equal(restoreSavedState(branch).steps.at(-1)?.summary, settledHistory.open?.summary);
+  assert.equal(collectStats(branch).summaryTokens, collectStats(entries).summaryTokens + 2);
+  handlers.get("turn_end")?.(routine, ctx);
+  await flush();
+  assert.equal(requests.length, 1); // Do not recheck the same evidence.
+  stream({ type: "thinking_delta", delta: "PRIVATE_REASONING_SENTINEL" });
+  assert.equal(requests.length, 1); // No per-token model calls.
+
+  addTurn("Authentication is fixed; investigate the separate billing outage", "Billing service is unavailable");
+  addTurn("The billing outage needs an independent queue repair");
+  addTurn("Queue corruption blocks billing recovery");
+  assert.equal(requests.length, 2); // Coalesce turns while the background check runs.
+  requests[1]!.resolve(response("STEP NEW | Investigating independent billing outage after authentication repair"));
+  await flush();
+  assert.equal(requests.length, 3);
+  assert.match(render(), /Investigating independent billing outage/);
+  assert.match(requests[2]!.prompt, /independent queue repair/);
+  assert.match(requests[2]!.prompt, /Queue corruption/);
+  assert.doesNotMatch(requests[2]!.prompt, /Checking authentication data|PRIVATE_REASONING_SENTINEL/);
+  requests[2]!.resolve(response("STEP NEW | Repairing corrupted billing queue to unblock recovery"));
+  await flush();
+  assert.match(render(), /Repairing corrupted billing queue/);
+  assert.match(render(), /Live ·/);
+  shortcuts.get("ctrl+shift+m")?.();
+  assert.match(render(), /Repairing corrupted billing queue/); // Both pane sizes retain pivot rows.
+  const pivots = restoreSavedState(branch);
+  assert.deepEqual(pivots.steps.slice(0, settledHistory.steps.length), settledHistory.steps);
+  assert.equal(pivots.steps.length, settledHistory.steps.length + 3);
+  assert.equal(pivots.open?.summary, "Repairing corrupted billing queue to unblock recovery");
+
+  addTurn("Routine verification of the queue repair");
+  requests[3]!.resolve(response("not a direction plan"));
+  await flush();
+  assert.match(render(), /Repairing corrupted billing queue/);
+  addTurn("Retry routine queue verification");
+  requests[4]!.resolve(response("", "error"));
+  await flush();
+  assert.match(render(), /Repairing corrupted billing queue/);
+
+  addTurn("A stale change must not replace the next run");
+  const oldRun = requests[5]!;
+  startRun("Verify billing recovery");
+  assert.equal(oldRun.signal?.aborted, true);
+  const entriesBeforeStale = appendedEntries;
+  const statsBeforeStale = collectStats(branch);
+  oldRun.resolve(response("STEP NEW | Stale direction from the previous active run"));
+  await flush();
+  assert.equal(appendedEntries, entriesBeforeStale + 1);
+  assert.equal(collectStats(branch).summaryTokens, statsBeforeStale.summaryTokens + 2);
+  assert.equal(collectStats(branch).cost, statsBeforeStale.cost + 0.01);
+  assert.match(render(), /Verify billing recovery/);
+  assert.doesNotMatch(render(), /Stale direction/);
+
+  addTurn("Another significant direction before settlement");
+  const unsettled = requests[6]!;
+  const statsBeforeSettlement = collectStats(branch);
+  const settling = Promise.resolve(handlers.get("agent_settled")?.({}, ctx));
+  assert.equal(unsettled.signal?.aborted, true);
+  unsettled.resolve(response("STEP NEW | Stale direction must not overwrite settled history"));
+  await flush();
+  assert.equal(collectStats(branch).summaryTokens, statsBeforeSettlement.summaryTokens + 2);
+  assert.equal(collectStats(branch).cost, statsBeforeSettlement.cost + 0.01);
+  const finalRequest = requests[7]!;
+  assert.notEqual(finalRequest.systemPrompt, LIVE_DIRECTION_SYSTEM_PROMPT);
+  const sourceIds = [...finalRequest.prompt.matchAll(/^(S\d+|CURRENT|NEW|N\d+):/gm)].map((match) => match[1]);
+  finalRequest.resolve(response(`STEP ${sourceIds.join("+")} | Restored authentication and billing after independent queue repair`));
+  await settling;
+  await flush();
+  assert.doesNotMatch(render(), /Live ·|Stale direction/);
+  assert.equal(restoreSavedState(branch).open?.summary, "Restored authentication and billing after independent queue repair");
+
+  startRun("Check final recovery");
+  addTurn("A stale direction from the previous session branch");
+  const treeRequest = requests.at(-1)!;
+  const entriesBeforeTree = appendedEntries;
+  await handlers.get("session_tree")?.({}, { ...ctx, model: undefined } as ExtensionContext);
+  assert.equal(treeRequest.signal?.aborted, true);
+  treeRequest.resolve(response("STEP NEW | Stale direction must not cross the session tree"));
+  await flush();
+  assert.equal(appendedEntries, entriesBeforeTree);
+  assert.doesNotMatch(render(), /Live ·|Stale direction/);
+
+  startRun("Check final recovery");
+  addTurn("A cancelled direction after shutdown");
+  const shutdownRequest = requests.at(-1)!;
+  handlers.get("session_shutdown")?.({}, ctx);
+  assert.equal(shutdownRequest.signal?.aborted, true);
+  const entriesBeforeShutdown = appendedEntries;
+  shutdownRequest.resolve(response("STEP NEW | Cancelled direction must not persist after shutdown"));
+  await flush();
+  assert.equal(appendedEntries, entriesBeforeShutdown);
+});
+
+
+test("steering and handback retain rows and retry billed live checkpoints", async (t) => {
+  type Handler = (event: unknown, ctx: ExtensionContext) => unknown;
+  const handlers = new Map<string, Handler>();
+  const shortcuts = new Map<string, () => void>();
+  let component: Component | undefined;
+  const tui = { requestRender: () => {}, terminal: { rows: 40 } } as unknown as TUI;
+  const theme = {
+    fg: (_color: string, text: string) => text,
+    bg: (_color: string, text: string) => text,
+    bold: (text: string) => text,
+  } as unknown as Theme;
+  const manager = SessionManager.inMemory(process.cwd());
+  const notices: string[] = [];
+  const requests: string[] = [];
+  const pivot = "Investigating independent billing outage after authentication repair";
+  const liveAnswers = ["UNCHANGED", `STEP NEW | ${pivot}`, `STEP NEW | ${pivot}`, "UNCHANGED"];
+  let failCheckpoint = true;
+  let completeCalls = 0;
+  const response = (text: string) => ({
+    role: "assistant" as const,
+    content: [{ type: "text" as const, text }],
+    api: "test", provider: "test", model: "test",
+    usage: usage(1, 1), stopReason: "stop" as const, timestamp: 1,
+  });
+  const ctx = {
+    mode: "tui", hasUI: true, model: { contextWindow: 100 },
+    sessionManager: manager, isIdle: () => true,
+    getContextUsage: () => ({ tokens: 10, percent: 10, contextWindow: 100 }),
+    ui: {
+      notify: (message: string) => notices.push(message),
+      custom: (factory: (tui: TUI, theme: Theme, keybindings: never, done: () => void) => Component,
+        options: { onHandle?: (handle: OverlayHandle) => void }) => {
+        component = factory(tui, theme, {} as never, () => {});
+        options.onHandle?.({ setHidden: () => {}, isHidden: () => false } as unknown as OverlayHandle);
+        return Promise.resolve(undefined);
+      },
+    },
+    modelRegistry: {
+      complete: async (_model: unknown, request: { systemPrompt: string; messages: Array<{ content: Array<{ text: string }> }> }) => {
+        completeCalls++;
+        requests.push(request.messages[0]!.content[0]!.text);
+        return response(request.systemPrompt === LIVE_DIRECTION_SYSTEM_PROMPT
+          ? liveAnswers.shift()!
+          : "STEP CURRENT+NEW | Verified final recovery after observed billing pivot");
+      },
+    },
+  } as unknown as ExtensionContext;
+  const pi = {
+    on: (event: string, handler: Handler) => handlers.set(event, handler),
+    registerCommand: () => {},
+    registerShortcut: (key: string, options: { handler: () => void }) => shortcuts.set(key, options.handler),
+    appendEntry: (type: string, data: { callUsage: { totalTokens: number } }) => {
+      manager.appendCustomEntry(type, data);
+      if (failCheckpoint && data.callUsage.totalTokens) {
+        failCheckpoint = false;
+        throw new Error("checkpoint failed after leaf mutation");
+      }
+    },
+  } as unknown as ExtensionAPI;
+  minimapExtension(pi);
+  const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
+  await handlers.get("session_start")?.({}, ctx);
+  const header = (expanded = false) => {
+    if (expanded) shortcuts.get("ctrl+shift+m")?.();
+    assert.ok(component);
+    const text = component.render(120).join("\n").split("Live ·")[0]!;
+    if (expanded) shortcuts.get("ctrl+shift+m")?.();
+    return text;
+  };
+  const assertCurrent = (calls: number, errors: number) => {
+    assert.match(header(), new RegExp(`working · read×${calls}\\b`));
+    if (errors) {
+      assert.match(header(), new RegExp(`${errors} step failures`));
+      assert.match(header(true), new RegExp(`${errors} current failures`));
+    } else {
+      assert.doesNotMatch(header(), /step failures/);
+      assert.doesNotMatch(header(true), /current failures/);
+    }
+  };
+  const rows = () => {
+    const saved = restoreSavedState(manager.getBranch());
+    return [...saved.steps, ...(saved.open ? [saved.open] : [])];
+  };
+  const steer = (content: UserMessage["content"]) => {
+    const message = { role: "user" as const, content, timestamp: 1 };
+    // Pi emits message_end before persisting the consumed steering message.
+    handlers.get("message_end")?.({ message }, ctx);
+    manager.appendMessage(message);
+  };
+  let turn = 0;
+  const addTurn = (text: string, isError = false) => {
+    const id = `call-${++turn}`;
+    const message = { ...response(text), stopReason: "toolUse" as const,
+      content: [...response(text).content, { type: "toolCall" as const, id, name: "read", arguments: {} }] };
+    const result = { role: "toolResult" as const, toolCallId: id, toolName: "read",
+      content: [{ type: "text" as const, text: "Public tool result" }], isError, timestamp: 1 };
+    manager.appendMessage(message);
+    handlers.get("tool_execution_start")?.({ toolName: "read" }, ctx);
+    handlers.get("tool_execution_end")?.({ toolName: "read", isError }, ctx);
+    manager.appendMessage(result);
+    const event = { message, toolResults: [result] };
+    handlers.get("turn_end")?.(event, ctx);
+    return event;
+  };
+
+  handlers.get("before_agent_start")?.({ prompt: "Repair authentication" }, ctx);
+  steer("Repair authentication");
+  const routine = addTurn("Checking authentication data", true);
+  await flush();
+  assert.equal(completeCalls, 1);
+  assert.equal(rows().length, 1);
+  assert.equal(collectStats(manager.getBranch()).summaryTokens, 0);
+  assert.match(notices[0] ?? "", /checkpoint failed/);
+  handlers.get("turn_end")?.(routine, ctx);
+  await flush();
+  assert.equal(completeCalls, 1); // Retry persistence, not the provider.
+  assert.equal(collectStats(manager.getBranch()).summaryTokens, 2);
+  assertCurrent(1, 1);
+
+  addTurn("Authentication is fixed; billing needs independent recovery");
+  await flush();
+  assert.deepEqual(rows().map((step) => step.summary), ["Repair authentication", pivot]);
+  assertCurrent(1, 0); // A public pivot excludes preceding failures.
+  assert.equal(rows()[0]?.errors, 1);
+  addTurn("Routine billing verification");
+  await flush();
+  assert.equal(rows().length, 2); // An identical title is not another pivot.
+  assertCurrent(2, 0); // Include pending activity after the pivot checkpoint.
+
+  steer("Verify billing recovery");
+  assert.equal(rows().length, 2); // Steering does not hide the last pivot.
+  assert.doesNotMatch(header(), /working ·|step failures/); // Do not wait for the next checkpoint.
+  assert.doesNotMatch(header(true), /current failures/);
+  addTurn("Checking final billing recovery");
+  await flush();
+  assert.equal(rows().length, 3);
+  assert.match(requests.at(-1) ?? "", /CURRENT MILESTONE: Verify billing recovery/);
+  assert.doesNotMatch(requests.at(-1) ?? "", /Checking authentication data/);
+  assertCurrent(1, 0); // Consumed steering starts a new counter scope.
+  assert.equal(rows()[1]?.tools.read, 2);
+  await handlers.get("agent_settled")?.({}, ctx);
+  assert.deepEqual(rows().map((step) => step.summary), [
+    "Repair authentication", pivot, "Verified final recovery after observed billing pivot",
+  ]);
+  assert.equal(collectStats(manager.getBranch()).summaryTokens, completeCalls * 2);
+
+  const image = { type: "image" as const, data: "dGVzdA==", mimeType: "image/png" };
+  const dimensionNote = formatDimensionNote({
+    ...image, originalWidth: 3840, originalHeight: 2160,
+    width: 2000, height: 1125, wasResized: true,
+  })!;
+  for (const [content, label] of [
+    [[image], "User request"],
+    [[image, { type: "text" as const, text: dimensionNote }], "User request"],
+    [[image, { type: "text" as const, text: `Inspect payment screenshot\n\n${dimensionNote}` }], "Inspect payment screenshot"],
+    [[image, { type: "text" as const, text: "[Image converted from image/bmp to image/png.]" }], "User request"],
+    [[{ type: "text" as const, text: "[Image omitted: could not be converted to a supported inline image format.]" }], "User request"],
+    [[{ type: "text" as const, text: "[Image omitted: could not be resized below the inline image size limit.]" }], "User request"],
+    [[image, { type: "text" as const, text: "Inspect payment screenshot\n\n[Image converted from image/bmp to image/png.]" }], "Inspect payment screenshot"],
+    [[{ type: "text" as const, text: "Inspect payment screenshot\n\n[Image omitted: could not be resized below the inline image size limit.]" }], "Inspect payment screenshot"],
+    [[image, { type: "text" as const, text: `[Image converted from image/tiff to image/png.]\n${dimensionNote}` }], "User request"],
+    [[image, { type: "text" as const, text: "[Image shows payment failure]" }], "[Image shows payment failure]"],
+    ["/tmp/minimap-screenshot.png", "User request"],
+    ['<file name="/abs/markup.txt">\nInline </file>\nFILE_BODY_SENTINEL\n</file>\nFix the checkout page', "Fix the checkout page"],
+    ['<file name="/abs/markup.txt">\nInline </file>\nFILE_BODY_SENTINEL\n</file>', "User request"],
+    ['<file name="/abs/shot.png"></file>\nFix the payment bug', "Fix the payment bug"],
+    ['<file name="/abs/shot.png"></file>', "User request"],
+    [`<file name="/abs/shot.png">${dimensionNote}</file>\nInspect payment screenshot`, "Inspect payment screenshot"],
+    ['<file name="/abs/shot.bmp">[Image converted from image/bmp to image/png.]</file>\nInspect payment screenshot', "Inspect payment screenshot"],
+    [`<file name="/abs/shot.bmp">[Image converted from image/bmp to image/png.]\n${dimensionNote}</file>\nInspect payment screenshot`, "Inspect payment screenshot"],
+    ['<file name="/abs/shot.tiff">[Image omitted: could not be converted to a supported inline image format.]</file>', "User request"],
+    ['<file name="/abs/shot.png">[Image omitted: could not be resized below the inline image size limit.]</file>\nInspect payment screenshot', "Inspect payment screenshot"],
+    ['<file name="/abs/first.png"></file>\n<file name="/abs/second.png"></file>\nCompare these payment screenshots', "Compare these payment screenshots"],
+    ['<file name="/abs/payment.ts">\nNATIVE_FILE_CONTEXT\n</file>\nFix the payment bug', "Fix the payment bug"],
+    ['<file name="/abs/payment.ts">\nNATIVE_FILE_CONTEXT\n</file>', "User request"],
+    ['[Image shows payment failure]\n<file name="/abs/shot.png"></file>', "[Image shows payment failure]"],
+  ] satisfies Array<[UserMessage["content"], string]>) {
+    const previousTitles = rows().map((step) => step.summary);
+    handlers.get("before_agent_start")?.({ prompt: "Follow the next request" }, ctx);
+    steer(content);
+    liveAnswers.push("UNCHANGED");
+    addTurn("Reviewed the supplied screenshot");
+    await flush();
+    assert.deepEqual(rows().map((step) => step.summary), [...previousTitles, label]);
+    assert.ok((requests.at(-1) ?? "").startsWith(`CURRENT MILESTONE: ${label}\n`));
+    assert.doesNotMatch(requests.at(-1) ?? "", /<file name=|NATIVE_FILE_CONTEXT|\[Image(?:: original | converted from | omitted: )/);
+    for (const mode of ["live", "history"] as const)
+      assert.doesNotMatch(buildTranscript(manager.getBranch().slice(-5), 18_000, mode), /<file name=|NATIVE_FILE_CONTEXT|\[Image(?:: original | converted from | omitted: )/);
+    await handlers.get("agent_settled")?.({}, ctx);
+    assert.deepEqual(rows().slice(0, -1).map((step) => step.summary), previousTitles);
+    assert.equal(rows().length, previousTitles.length + 1);
+  }
+  assert.equal(collectStats(manager.getBranch()).summaryTokens, completeCalls * 2);
+
+  const delayed: Array<(value: ReturnType<typeof response>) => void> = [];
+  t.mock.method(ctx.modelRegistry, "complete", () =>
+    new Promise<ReturnType<typeof response>>((resolve) => delayed.push(resolve)));
+  handlers.get("before_agent_start")?.({ prompt: "Verify delayed checkpoint recovery" }, ctx);
+  steer("Verify delayed checkpoint recovery");
+  addTurn("Checking delayed billing");
+  const beforeLate = collectStats(manager.getBranch());
+  const noticesBeforeLate = notices.length;
+  const settling = Promise.resolve(handlers.get("agent_settled")?.({}, ctx));
+  assert.equal(delayed.length, 2);
+  failCheckpoint = true;
+  delayed[0]!({ ...response("STEP NEW | Stale direction must not overwrite the settlement"), usage: usage(11, 0) });
+  await flush();
+  assert.match(notices.at(-1) ?? "", /checkpoint failed/);
+  assert.equal(notices.length, noticesBeforeLate + 1);
+  assert.equal(collectStats(manager.getBranch()).summaryTokens, beforeLate.summaryTokens);
+  delayed[1]!({ ...response("STEP CURRENT+NEW | Verified delayed checkpoint recovery with retained usage"), usage: usage(22, 0) });
+  await settling;
+  assert.equal(collectStats(manager.getBranch()).summaryTokens, beforeLate.summaryTokens + 33);
+  assert.equal(collectStats(manager.getBranch()).cost, beforeLate.cost + 0.02);
+  await handlers.get("agent_settled")?.({}, ctx);
+  assert.equal(delayed.length, 2);
+  assert.equal(collectStats(manager.getBranch()).summaryTokens, beforeLate.summaryTokens + 33);
+  assert.equal(rows().at(-1)?.summary, "Verified delayed checkpoint recovery with retained usage");
+  handlers.get("session_shutdown")?.({}, ctx);
+});
+
+test("Current infers user titles, refines without tools or rows, and replays evidence badges", async (t) => {
+  type Handler = (event: unknown, ctx: ExtensionContext) => unknown;
+  const handlers = new Map<string, Handler>();
+  const shortcuts = new Map<string, () => void>();
+  const manager = SessionManager.inMemory(process.cwd());
+  const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
+  const userTitle = "Repair payment confirmation when settled invoices are reopened";
+  const refinedTitle = "Repair duplicate payment confirmation using the existing retry policy";
+  const pivot = "Investigate independent invoice corruption blocking the payment repair";
+  const answers = [`STEP CURRENT | ${userTitle}`, `STEP CURRENT | ${refinedTitle}`, `STEP NEW | ${pivot}`, "UNCHANGED"];
+  const prompts: string[] = [];
+  let component: Component | undefined;
+  let failRefinement = false;
+  const response = (text: string) => ({
+    role: "assistant" as const, content: [{ type: "text" as const, text }],
+    api: "test", provider: "test", model: "test", stopReason: "stop" as const, timestamp: 1,
+    usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.01 } },
+  });
+  const model = { contextWindow: 100 };
+  const ctx = {
+    get mode() { return "tui" as const; }, hasUI: true, model, sessionManager: manager, isIdle: () => true,
+    getContextUsage: () => ({ tokens: 10, percent: 10, contextWindow: 100 }),
+    modelRegistry: { complete: async (selected: unknown, request: { messages: Array<{ content: Array<{ text: string }> }> }) => {
+      assert.equal(selected, model);
+      prompts.push(request.messages[0]!.content[0]!.text);
+      assert.ok(answers.length, "unexpected model call");
+      return response(answers.shift()!);
+    } },
+    ui: { notify: () => {}, custom: (factory: (tui: TUI, theme: Theme, keybindings: never, done: () => void) => Component,
+      options: { onHandle?: (handle: OverlayHandle) => void }) => {
+      component = factory({ requestRender: () => {}, terminal: { rows: 50 } } as unknown as TUI,
+        { fg: (_: string, text: string) => text, bg: (_: string, text: string) => text, bold: (text: string) => text } as unknown as Theme, {} as never, () => {});
+      options.onHandle?.({ setHidden: () => {}, isHidden: () => false } as unknown as OverlayHandle);
+      return Promise.resolve(undefined);
+    } },
+  } as unknown as ExtensionContext;
+  minimapExtension({
+    on: (event: string, handler: Handler) => handlers.set(event, handler), registerCommand: () => {},
+    registerShortcut: (key: string, options: { handler: () => void }) => shortcuts.set(key, options.handler),
+    appendEntry: (type: string, data: unknown) => {
+      manager.appendCustomEntry(type, data);
+      if (failRefinement) { failRefinement = false; throw new Error("refinement append failed after leaf mutation"); }
+    },
+  } as unknown as ExtensionAPI);
+  const rows = () => {
+    const saved = restoreSavedState(manager.getBranch());
+    return [...saved.steps, ...(saved.open ? [saved.open] : [])];
+  };
+  const assertBadge = (badge: string, title: string) => {
+    for (let layout = 0; layout < 2; layout++) {
+      const text = component!.render(120).join("\n");
+      const marker = `${badge} ${title.split(/\s+/).slice(0, 3).join(" ")}`;
+      assert.ok(text.split("\n").some((line) => /\b\d+\./.test(line) && line.includes(marker)), text);
+      if (rows().at(-1)?.summary === title && text.includes("Current"))
+        assert.ok(text.split("\n").some((line) => line.includes("Current") && line.includes(marker)), text);
+      shortcuts.get("ctrl+shift+m")!();
+    }
+  };
+  const steer = (content: UserMessage["content"]) => {
+    const message = { role: "user" as const, content, timestamp: 1 };
+    handlers.get("message_end")!({ message }, ctx);
+    manager.appendMessage(message); // Native ordering: emit, then persist.
+  };
+  const turn = (text: string) => {
+    const message = { ...response(text), content: [
+      { type: "thinking" as const, thinking: "**PRIVATE_TITLE_SENTINEL**" },
+      { type: "text" as const, text },
+    ] };
+    handlers.get("message_end")!({ message }, ctx);
+    manager.appendMessage(message);
+    const event = { message, toolResults: [] };
+    handlers.get("turn_end")!(event, ctx);
+    return event;
+  };
+  await handlers.get("session_start")!({}, ctx);
+  const request = "When I reopen a settled invoice, the payment confirmation runs again. Please find the cause and fix it without replacing the existing retry policy.";
+  handlers.get("before_agent_start")!({ prompt: request }, ctx);
+  steer(request);
+  await flush();
+  assert.equal(prompts.length, 1);
+  assert.ok(prompts[0]!.includes(request));
+  assert.deepEqual(rows().map((step) => [step.summary, step.evidence]), [[userTitle, "user"]]);
+  assertBadge("👤", userTitle);
+
+  failRefinement = true;
+  const refiningTurn = turn("The existing retry policy already supports deduplication; I will use it for payment confirmation.");
+  await flush();
+  assert.equal(rows()[0]?.summary, userTitle); // Failed refinement is not published.
+  assert.equal(collectStats(manager.getBranch()).summaryTokens, 2);
+  handlers.get("turn_end")!(refiningTurn, ctx);
+  await flush(); // Retry the checkpoint, not the provider.
+  assert.equal(prompts.length, 2); // Completed assistant turn, no tools required.
+  assert.doesNotMatch(prompts[1]!, /PRIVATE_TITLE_SENTINEL/);
+  assert.deepEqual(rows().map((step) => [step.summary, step.evidence]), [[refinedTitle, "both"]]);
+  assertBadge("🔗", refinedTitle);
+  const beforeDuplicate = collectStats(manager.getBranch()).summaryTokens;
+  answers.unshift(`STEP NEW | ${refinedTitle}`);
+  turn("The repair direction is unchanged; continue the current payment confirmation work.");
+  await flush();
+  assertBadge("🔗", refinedTitle);
+  assert.deepEqual(rows().map((step) => [step.summary, step.evidence]), [[refinedTitle, "both"]]);
+  assert.equal(collectStats(manager.getBranch()).summaryTokens, beforeDuplicate + 2);
+  for (const mode of ["live", "history"] as const)
+    assert.doesNotMatch(buildTranscript(manager.getBranch(), 18_000, mode), /PRIVATE_TITLE_SENTINEL/);
+
+  turn("An independent invoice corruption blocker prevents this repair; I will investigate that first.");
+  await flush();
+  assert.deepEqual(rows().map((step) => [step.summary, step.evidence]), [[refinedTitle, "both"], [pivot, "agent"]]);
+  assertBadge("🤖", pivot);
+  turn("Continuing the invoice corruption investigation.");
+  await flush();
+  assert.equal(rows().length, 2);
+  assert.equal(collectStats(manager.getBranch()).summaryTokens, 10);
+  const settledTitle = "Resolved invoice corruption preserving payment confirmation retry policy";
+  answers.push(`STEP CURRENT+NEW | ${settledTitle}`);
+  await handlers.get("agent_settled")!({}, ctx);
+  assert.deepEqual(rows().map((step) => [step.summary, step.evidence]), [[refinedTitle, "both"], [settledTitle, "agent"]]);
+  assert.equal(collectStats(manager.getBranch()).summaryTokens, 12);
+  assert.doesNotMatch(prompts.at(-1)!, /PRIVATE_TITLE_SENTINEL/);
+
+  const shortTitle = "Proceed with the work approved by the user";
+  answers.push(`STEP CURRENT | ${shortTitle}`);
+  handlers.get("before_agent_start")!({ prompt: "yes" }, ctx);
+  steer("yes");
+  await flush();
+  assert.equal(rows().length, 3);
+  assert.equal(rows().at(-1)?.evidence, "user");
+  assert.equal(rows().at(-1)?.summary, shortTitle);
+  assertBadge("👤", shortTitle);
+
+  // A later native handler can delay persistence and replace the consumed message.
+  const oldWork = { ...response("Read the previous approval instructions"), stopReason: "toolUse" as const,
+    content: [{ type: "toolCall" as const, id: "prior-read", name: "read", arguments: {} }] };
+  const oldResult = { role: "toolResult" as const, toolCallId: "prior-read", toolName: "read",
+    content: [{ type: "text" as const, text: "Prior goal read failed" }], isError: true, timestamp: 1 };
+  manager.appendMessage(oldWork);
+  manager.appendMessage(oldResult);
+  answers.push("UNCHANGED");
+  handlers.get("turn_end")!({ message: oldWork, toolResults: [oldResult] }, ctx);
+  await flush();
+  const beforeDelayed = rows();
+  const callsBeforeDelayed = prompts.length;
+  const delayedTitle = "Restore billing notifications after repairing invoice confirmation failures";
+  answers.push(`STEP CURRENT | ${delayedTitle}`);
+  let releaseHandler!: () => void;
+  const delayedHandler = new Promise<void>((resolve) => { releaseHandler = resolve; });
+  const runner = new ExtensionRunner([
+    { path: "minimap", handlers: new Map([["message_end", [handlers.get("message_end")!]]]) },
+    { path: "delay", handlers: new Map([["message_end", [async () => {
+      await delayedHandler;
+      return { message: { role: "user" as const, content: "Repair billing notification failures after invoice confirmation", timestamp: 1 } };
+    }]]]) },
+  ] as unknown as ConstructorParameters<typeof ExtensionRunner>[0], createExtensionRuntime(), process.cwd(), manager, ctx.modelRegistry);
+  t.mock.method(runner, "createContext", () => ctx);
+  const nextMessage = { role: "user" as const, content: "Fix billing notifications", timestamp: 1 };
+  handlers.get("before_agent_start")!({ prompt: nextMessage.content }, ctx);
+  for (let layout = 0; layout < 2; layout++) {
+    const header = component!.render(120).join("\n").split("Live ·")[0]!;
+    assert.doesNotMatch(header, /working ·|step failures|current failures/);
+    shortcuts.get("ctrl+shift+m")!();
+  }
+  const dispatch = runner.emitMessageEnd({ type: "message_end", message: nextMessage });
+  await flush();
+  assert.equal(prompts.length, callsBeforeDelayed); // Never infer into the preceding open row.
+  assert.deepEqual(rows(), beforeDelayed);
+  for (let layout = 0; layout < 2; layout++) {
+    const header = component!.render(120).join("\n").split("Live ·")[0]!;
+    assert.doesNotMatch(header, /working ·|step failures|current failures/);
+    shortcuts.get("ctrl+shift+m")!();
+  }
+  releaseHandler();
+  const finalMessage = (await dispatch) ?? nextMessage;
+  assert.ok(finalMessage.role === "user");
+  manager.appendMessage(finalMessage);
+  handlers.get("message_start")!({ message: response("") }, ctx);
+  await flush();
+  assert.equal(prompts.length, callsBeforeDelayed + 1);
+  assert.match(prompts.at(-1)!, /USER REQUEST:\nRepair billing notification failures after invoice confirmation/);
+  assert.deepEqual(rows().slice(0, -1).map(({ summary, evidence }) => [summary, evidence]),
+    beforeDelayed.map(({ summary, evidence }) => [summary, evidence]));
+  assert.equal(rows().at(-1)?.summary, delayedTitle);
+  assert.equal(rows().at(-1)?.evidence, "user");
+  assertBadge("👤", delayedTitle);
+
+  // A reload reads the recorded metadata; it does not need a model call.
+  const callsBeforeReload = prompts.length;
+  await handlers.get("session_start")!({}, { ...ctx, model: undefined });
+  assertBadge("🔗", refinedTitle);
+  assertBadge("🤖", settledTitle);
+  assert.equal(prompts.length, callsBeforeReload);
+  const shutdownTitle = "Do not start inferred task checks after shutdown";
+  answers.push(`STEP CURRENT | ${shutdownTitle}`);
+  handlers.get("before_agent_start")!({ prompt: shutdownTitle }, ctx);
+  const shutdownMessage = { role: "user" as const, content: shutdownTitle, timestamp: 1 };
+  manager.appendMessage((await runner.emitMessageEnd({ type: "message_end", message: shutdownMessage })) as UserMessage);
+  const callsBeforeShutdown = prompts.length;
+  const entriesBeforeShutdown = manager.getBranch().length;
+  handlers.get("session_shutdown")!({}, ctx);
+  await flush();
+  assert.equal(prompts.length, callsBeforeShutdown);
+  assert.equal(manager.getBranch().length, entriesBeforeShutdown);
+
+  manager.newSession();
+  await handlers.get("session_start")!({}, ctx);
+  const skill = '<skill name="cloudflare" location="/x/SKILL.md">\nSKILL_CONTEXT_SENTINEL\n</skill>';
+  const skillTitle = "Deploy a Worker using the existing D1 database binding";
+  const skillRunner = new ExtensionRunner([
+    { path: "minimap", handlers: new Map([["message_end", [handlers.get("message_end")!]]]) },
+  ] as unknown as ConstructorParameters<typeof ExtensionRunner>[0], createExtensionRuntime(), process.cwd(), manager, ctx.modelRegistry);
+  t.mock.method(skillRunner, "createContext", () => ctx);
+  handlers.get("before_agent_start")!({ prompt: skill }, ctx);
+  const skillMessage = { role: "user" as const, content: skill, timestamp: 1 };
+  await skillRunner.emitMessageEnd({ type: "message_end", message: skillMessage });
+  manager.appendMessage(skillMessage);
+  const callsBeforeSkill = prompts.length;
+  handlers.get("message_start")!({ message: response("") }, ctx);
+  await flush();
+  assert.equal(prompts.length, callsBeforeSkill); // Context injection alone is not task evidence.
+  assert.doesNotMatch(component!.render(120).join("\n"), /<skill|SKILL_CONTEXT_SENTINEL|👤/);
+  manager.appendMessage(oldWork);
+  manager.appendMessage({ ...oldResult, content: [{ type: "text", text: "Skill run read failed" }] });
+  answers.unshift(`STEP CURRENT | ${skillTitle}`);
+  turn("I will deploy the Worker using the existing D1 binding.");
+  await flush();
+  assert.equal(prompts.length, callsBeforeSkill + 1);
+  assert.doesNotMatch(prompts.at(-1)!, /<skill|SKILL_CONTEXT_SENTINEL/);
+  assert.deepEqual(rows().map((step) => [step.summary, step.evidence]), [[skillTitle, "agent"]]);
+  assertBadge("🤖", skillTitle);
+  const assertCurrentCounters = () => {
+    for (let layout = 0; layout < 2; layout++) {
+      const header = component!.render(120).join("\n").split("Live ·")[0]!;
+      assert.match(header, /read×1|100% calls/);
+      assert.match(header, /1 (?:step|current) failures/);
+      shortcuts.get("ctrl+shift+m")!();
+    }
+  };
+  assertCurrentCounters();
+  const callsBeforeContext = prompts.length;
+  handlers.get("before_agent_start")!({ prompt: skill }, ctx);
+  assertBadge("🤖", skillTitle); // Context-only invocation retains known title evidence.
+  await skillRunner.emitMessageEnd({ type: "message_end", message: skillMessage });
+  manager.appendMessage(skillMessage);
+  handlers.get("message_start")!({ message: response("") }, ctx);
+  await flush();
+  assertBadge("🤖", skillTitle);
+  assert.equal(rows().length, 1);
+  assertCurrentCounters();
+  assert.equal(prompts.length, callsBeforeContext); // A context-only arrival cannot replay accepted public evidence.
+  const tokensBeforeRewrite = collectStats(manager.getBranch()).summaryTokens;
+  const complete = ctx.modelRegistry.complete.bind(ctx.modelRegistry);
+  let pauseOld = true;
+  let oldSignal: AbortSignal | undefined;
+  let resolveOld!: (value: ReturnType<typeof response>) => void;
+  const oldResponse = new Promise<ReturnType<typeof response>>((resolve) => { resolveOld = resolve; });
+  t.mock.method(ctx.modelRegistry, "complete", (...args: Parameters<typeof complete>) => {
+    if (pauseOld) { pauseOld = false; oldSignal = args[2]?.signal; return oldResponse; }
+    return complete(...args);
+  });
+  turn("I will continue the existing deployment check before making further changes.");
+  assert.equal(oldSignal?.aborted, false);
+  let releaseRewrite!: () => void;
+  const rewriteGate = new Promise<void>((resolve) => { releaseRewrite = resolve; });
+  const finalTask = "Investigate independent invoice corruption blocking deployment";
+  const finalTitle = "Investigate invoice corruption before deploying the payment confirmation repair";
+  const rewriteRunner = new ExtensionRunner([
+    { path: "minimap", handlers: new Map([["message_end", [handlers.get("message_end")!]]]) },
+    { path: "rewrite-skill", handlers: new Map([["message_end", [async () => {
+      await rewriteGate;
+      return { message: { role: "user" as const, content: finalTask, timestamp: 1 } };
+    }]]]) },
+  ] as unknown as ConstructorParameters<typeof ExtensionRunner>[0], createExtensionRuntime(), process.cwd(), manager, ctx.modelRegistry);
+  t.mock.method(rewriteRunner, "createContext", () => ctx);
+  const rewriting = rewriteRunner.emitMessageEnd({ type: "message_end", message: skillMessage });
+  await flush();
+  assert.equal(oldSignal?.aborted, true);
+  assertBadge("🤖", skillTitle);
+  assertCurrentCounters(); // Unpersisted steering has not changed the task boundary.
+  releaseRewrite();
+  manager.appendMessage((await rewriting) as UserMessage);
+  answers.unshift(`STEP CURRENT | ${finalTitle}`);
+  handlers.get("message_start")!({ message: response("") }, ctx);
+  await flush();
+  assert.match(prompts.at(-1)!, new RegExp(`USER REQUEST:\\n${finalTask}`));
+  assertBadge("👤", finalTitle);
+  resolveOld(response(`STEP CURRENT | ${skillTitle}`));
+  await flush();
+  assert.deepEqual(rows().map((step) => [step.summary, step.evidence]), [[skillTitle, "agent"], [finalTitle, "user"]]);
+  assert.equal(collectStats(manager.getBranch()).summaryTokens, tokensBeforeRewrite + 4);
+  assertBadge("👤", finalTitle);
+
+  const tokensBeforeBackfill = collectStats(manager.getBranch()).summaryTokens;
+  let backfillCalls = 0;
+  let resolveBackfill!: (value: ReturnType<typeof response>) => void;
+  const backfillResponse = new Promise<ReturnType<typeof response>>((resolve) => { resolveBackfill = resolve; });
+  t.mock.method(ctx.modelRegistry, "complete", (...args: Parameters<typeof complete>) => {
+    backfillCalls++;
+    if (backfillCalls === 1) return backfillResponse;
+    return complete(...args);
+  });
+  manager.appendMessage(response("The previous run completed its invoice investigation before the session resumed."));
+  handlers.get("session_start")!({}, ctx); // Startup backfill is asynchronous, unlike settled dispatch.
+  assert.equal(backfillCalls, 1);
+  await handlers.get("model_select")!({}, ctx); // Idle selection queues another summary behind startup backfill.
+  t.mock.method(ctx, "isIdle", () => false); // A new primary run now streams before either backfill can finish.
+  handlers.get("before_agent_start")!({ prompt: skill }, ctx);
+  manager.appendMessage((await rewriteRunner.emitMessageEnd({ type: "message_end", message: skillMessage })) as UserMessage);
+  handlers.get("message_start")!({ message: response("") }, ctx);
+  turn("I will inspect deployment receipts using the invoice investigation results.");
+  handlers.get("message_start")!({ message: response("") }, ctx);
+  await flush();
+  assertBadge("👤", finalTask); // Final local evidence must bind while the paid backfill is still pending.
+  assert.equal(backfillCalls, 1); // No concurrent live completion.
+  answers.unshift(`STEP CURRENT | ${finalTitle}`);
+  resolveBackfill(response(`TAIL CURRENT+NEW | ${finalTitle}`));
+  await flush();
+  assert.equal(backfillCalls, 2); // Resume exactly one coalesced check, without waiting for another turn.
+  assert.match(prompts.at(-1)!, new RegExp(`USER REQUEST:\\n${finalTask}`));
+  assertBadge("🔗", finalTitle);
+  assert.deepEqual(rows().map((step) => [step.summary, step.evidence]), [[skillTitle, "agent"], [finalTitle, "user"], [finalTitle, "both"]]);
+  assert.equal(collectStats(manager.getBranch()).summaryTokens, tokensBeforeBackfill + 4);
+  const skillRequest = "Repair payment notifications using the existing D1 binding";
+  handlers.get("before_agent_start")!({ prompt: `${skill}\n${skillRequest}` }, ctx);
+  const skillPreview = component!.render(120).join("\n");
+  assert.doesNotMatch(skillPreview, /<skill|SKILL_CONTEXT_SENTINEL/);
+  assert.match(skillPreview, /👤 Repair payment notifications/);
+
+  let preflightCalls = 0;
+  let resolvePreflight!: (value: ReturnType<typeof response>) => void;
+  const preflightResponse = new Promise<ReturnType<typeof response>>((resolve) => { resolvePreflight = resolve; });
+  t.mock.method(ctx.modelRegistry, "complete", () => { preflightCalls++; return preflightResponse; });
+  t.mock.method(ctx, "isIdle", () => true);
+  manager.appendMessage(response("Public receipts remained uncheckpointed at the next startup."));
+  handlers.get("session_start")!({}, ctx);
+  await handlers.get("model_select")!({}, ctx);
+  handlers.get("before_agent_start")!({ prompt: `${skill}\n${skillRequest}` }, ctx);
+  resolvePreflight(response(`TAIL CURRENT+NEW | ${finalTitle}`));
+  await flush();
+  assert.equal(preflightCalls, 1); // SDK isIdle stays true during before_agent_start preflight.
+  assert.match(component!.render(120).join("\n"), /Current · 👤 Repair payment notifications/);
+
+  let stoppedCalls = 0;
+  let resolveStopped!: (value: ReturnType<typeof response>) => void;
+  const stoppedResponse = new Promise<ReturnType<typeof response>>((resolve) => { resolveStopped = resolve; });
+  t.mock.method(ctx.modelRegistry, "complete", () => { stoppedCalls++; return stoppedResponse; });
+  t.mock.method(ctx, "isIdle", () => true);
+  manager.appendMessage(response("Prior public work remained uncheckpointed when the session resumed again."));
+  handlers.get("session_start")!({}, ctx);
+  assert.equal(stoppedCalls, 1);
+  t.mock.method(ctx, "isIdle", () => false);
+  handlers.get("before_agent_start")!({ prompt: skill }, ctx);
+  manager.appendMessage((await rewriteRunner.emitMessageEnd({ type: "message_end", message: skillMessage })) as UserMessage);
+  handlers.get("message_start")!({ message: response("") }, ctx);
+  await flush();
+  const rowsBeforeStop = rows().map((step) => [step.createdAt, step.summary, step.evidence]);
+  handlers.get("session_shutdown")!({}, ctx);
+  let lateModeReads = 0;
+  t.mock.getter(ctx, "mode", () => { lateModeReads++; return "tui" as const; });
+  resolveStopped(response(`TAIL CURRENT+NEW | ${finalTitle}`));
+  await flush();
+  assert.equal(stoppedCalls, 1);
+  assert.equal(lateModeReads, 0); // Both cancellation/ownership protections must prevent invalid-context access.
+  assert.deepEqual(rows().map((step) => [step.createdAt, step.summary, step.evidence]), rowsBeforeStop);
+  handlers.get("session_shutdown")!({}, ctx);
 });

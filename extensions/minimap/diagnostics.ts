@@ -209,8 +209,13 @@ export const extractSkills = (
   return skills;
 };
 
+// Native invocation owns one leading envelope; its suffix is user arguments, even when they contain tags.
+const stripSkillContext = (text: string): string => text.replace(
+  /^\s*<skill\b(?=[^>]*\bname=["'])[^>]*>(?:\r?\n[\s\S]*?\r?\n|[^\r\n]*?)<\/skill>/, "",
+);
+
 export const isStandaloneSkillInjection = (text: string): boolean =>
-  /^<skill\s+name=["'][^"']+["'][^>]*>[\s\S]*<\/skill>$/.test(text.trim());
+  text.trim().startsWith("<skill") && !stripSkillContext(text).trim();
 
 const stripTerminalStrings = (text: string): string => {
   let safe = "";
@@ -393,6 +398,11 @@ export const conciseStep = (text: string, maxWords = 10): string => {
     .replace(/[,:-]+$/, "");
 };
 
+// ponytail: SDK text files end at the last closing line; image hints start inline. Use metadata if Pi changes the format.
+export const requestText = (text: string): string => stripSkillContext(text)
+  .replace(/<file name="[^\r\n]*?">(?:\r?\n[\s\S]*\r?\n|(?!\r?\n)[\s\S]*?)<\/file>/g, "")
+  .replace(/^\[Image(?:: original | converted from | omitted: )[^\r\n]*\]\r?$/gm, "")
+  .trim();
 export const readableGoal = (text: string): string => {
   const images = [...text.matchAll(/\.(?:png|jpe?g|gif|webp)/gi)];
   const first = images[0];
