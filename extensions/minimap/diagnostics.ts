@@ -209,8 +209,13 @@ export const extractSkills = (
   return skills;
 };
 
+// Native skill bodies use newline-delimited tags; keep the existing single-line envelope too.
+const stripSkillContext = (text: string): string => text.replace(
+  /<skill\b(?=[^>]*\bname=["'])[^>]*>(?:\r?\n[\s\S]*?\r?\n|[^\r\n]*?)<\/skill>/g, "",
+);
+
 export const isStandaloneSkillInjection = (text: string): boolean =>
-  /^<skill\s+name=["'][^"']+["'][^>]*>[\s\S]*<\/skill>$/.test(text.trim());
+  text.trim().startsWith("<skill") && !stripSkillContext(text).trim();
 
 const stripTerminalStrings = (text: string): string => {
   let safe = "";
@@ -393,10 +398,9 @@ export const conciseStep = (text: string, maxWords = 10): string => {
     .replace(/[,:-]+$/, "");
 };
 
-// ponytail: native file-context prefix ends at its last closing tag; use structured metadata if Pi changes this format.
-export const requestText = (text: string): string => text
-  .replace(/<file name="[^\r\n]*?">[\s\S]*<\/file>/g, "")
-  .replace(/<skill name="[^\r\n]*?">[\s\S]*<\/skill>/g, "")
+// ponytail: SDK text files end at the last closing line; image hints start inline. Use metadata if Pi changes the format.
+export const requestText = (text: string): string => stripSkillContext(text)
+  .replace(/<file name="[^\r\n]*?">(?:\r?\n[\s\S]*\r?\n|(?!\r?\n)[\s\S]*?)<\/file>/g, "")
   .replace(/^\[Image(?:: original | converted from | omitted: )[^\r\n]*\]\r?$/gm, "")
   .trim();
 export const readableGoal = (text: string): string => {

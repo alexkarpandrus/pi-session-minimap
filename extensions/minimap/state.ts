@@ -82,6 +82,7 @@ export interface CurrentStep {
   needsTitle?: boolean;
   userAfterEntryId?: string | undefined;
   awaitingUser?: boolean;
+  previewingTask?: boolean;
   tools: Record<string, number>;
   errors: number;
   phase?: { label: string; startedAt: number };

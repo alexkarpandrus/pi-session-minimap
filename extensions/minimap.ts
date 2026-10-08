@@ -260,20 +260,13 @@ export default function minimapExtension(pi: ExtensionAPI) {
 
   const updateLiveDirection = async (ctx: ExtensionContext): Promise<void> => {
     const current = state.current;
-    if (ctx.mode !== "tui" || !ctx.model || !current || summaryRunning) return;
-    if (current.awaitingUser) {
-      // message_end dispatch can await other handlers before Pi appends their final message.
-      const consumed = entriesAfter(ctx.sessionManager.getBranch(), current.userAfterEntryId).flatMap((entry) =>
-        entry.type === "message" && entry.message.role === "user"
-          ? [entry.message] : []).at(0);
-      if (!consumed) return;
-      const text = textContent(consumed.content);
-      const injection = isStandaloneSkillInjection(text);
-      current.request = requestText(text);
-      current.label = injection ? state.open?.summary ?? promptLabel(text) : promptLabel(text);
-      current.evidence = injection ? state.open?.evidence : "user";
-      current.awaitingUser = false;
-    }
+    if (ctx.mode !== "tui" || !current || summaryRunning) return;
+    // Dispatch can await later rewrites; only the final persisted user owns task evidence.
+    const consumed = current.awaitingUser
+      ? entriesAfter(ctx.sessionManager.getBranch(), current.userAfterEntryId).flatMap((entry) =>
+        entry.type === "message" && entry.message.role === "user" ? [entry.message] : []).at(0)
+      : undefined;
+    if (current.awaitingUser && !consumed) return;
     if (directionAbort) {
       directionPending = true;
       return;
@@ -282,6 +275,17 @@ export default function minimapExtension(pi: ExtensionAPI) {
       if (ctx.hasUI) ctx.ui.notify("Minimap checkpoint failed; persistence will retry before another model call", "warning");
       return;
     }
+    if (consumed) {
+      const text = textContent(consumed.content);
+      const injection = isStandaloneSkillInjection(text);
+      current.request = requestText(text);
+      current.label = injection ? state.open?.summary ?? promptLabel(text) : promptLabel(text);
+      current.evidence = injection ? state.open?.evidence : "user";
+      current.needsTitle = !injection || !state.open;
+      current.awaitingUser = false;
+      current.previewingTask = false;
+    }
+    if (!ctx.model) return;
     const pending = entriesAfter(
       ctx.sessionManager.getBranch(), directionThroughEntryId,
     );
@@ -709,7 +713,8 @@ export default function minimapExtension(pi: ExtensionAPI) {
       label: injection ? state.open?.summary ?? promptLabel(event.prompt) : promptLabel(event.prompt),
       evidence: injection ? state.open?.evidence : "user",
       request: requestText(event.prompt),
-      needsTitle: true,
+      needsTitle: !injection || !state.open,
+      previewingTask: !injection,
       userAfterEntryId: directionThroughEntryId,
       awaitingUser: true,
       tools: emptyCounts(),
@@ -724,7 +729,7 @@ export default function minimapExtension(pi: ExtensionAPI) {
     if (event.message.role !== "assistant") return;
     streamingActivity = false;
     updateActivity("Generating response");
-    if (state.current?.needsTitle && state.current.awaitingUser !== undefined) void updateLiveDirection(ctx);
+    if (state.current?.awaitingUser || state.current?.needsTitle) void updateLiveDirection(ctx);
   });
 
   pi.on("message_update", (event) => {
@@ -771,19 +776,18 @@ export default function minimapExtension(pi: ExtensionAPI) {
 
   pi.on("message_end", (event, ctx) => {
     if (event.message.role === "user") {
-      const text = textContent(event.message.content);
-      const label = promptLabel(text);
-      if (!isStandaloneSkillInjection(text)) {
-        cancelDirectionUpdate();
-        runContextStart = snapshotContext(ctx);
-        if (state.current) {
-          state.current = { ...state.current, label, evidence: "user", request: requestText(text), needsTitle: true,
-            userAfterEntryId: ctx.sessionManager.getBranch().at(-1)?.id, awaitingUser: true };
-          // Try after dispatch yields; updateLiveDirection checks persistence, not callback timing.
-          const current = state.current;
-          const generation = branchGeneration;
-          setImmediate(() => { if (generation === branchGeneration && state.current === current && directionThroughEntryId === undefined) void updateLiveDirection(ctx); });
-        }
+      const checkedThrough = directionThroughEntryId;
+      cancelDirectionUpdate();
+      // Cancel the request, not the accepted evidence cursor: context arrivals are not task boundaries.
+      directionThroughEntryId = checkedThrough;
+      runContextStart = snapshotContext(ctx);
+      if (state.current) {
+        state.current = { ...state.current,
+          userAfterEntryId: ctx.sessionManager.getBranch().at(-1)?.id, awaitingUser: true };
+        // Keep the current task until dispatch finishes and the final message is persisted.
+        const current = state.current;
+        const generation = branchGeneration;
+        setImmediate(() => { if (generation === branchGeneration && state.current === current && current.awaitingUser) void updateLiveDirection(ctx); });
       }
     }
     if (event.message.role === "assistant") {

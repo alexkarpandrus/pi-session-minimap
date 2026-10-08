@@ -43,6 +43,7 @@ import minimapExtension, {
 } from "./minimap.ts";
 import { LIVE_DIRECTION_SYSTEM_PROMPT, buildTranscript, splitPendingActivity } from "./minimap/summary.ts";
 import { decideMilestoneBoundary } from "./minimap/jev.ts";
+import { requestText } from "./minimap/diagnostics.ts";
 
 // Lifecycle tests must not use the operator's optional paid Jev gate.
 delete process.env.PI_MINIMAP_JEV;
@@ -805,16 +806,20 @@ test("failure labels strip terminal control strings", () => {
 });
 
 test("standalone skill injections do not start semantic steps", () => {
-  assert.equal(
-    isStandaloneSkillInjection('<skill name="cloudflare">instructions</skill>'),
-    true,
-  );
-  assert.equal(
-    isStandaloneSkillInjection(
-      '<skill name="cloudflare">instructions</skill>\nAdd email',
-    ),
-    false,
-  );
+  assert.equal(isStandaloneSkillInjection('<skill name="cloudflare">instructions</skill>'), true);
+  assert.equal(isStandaloneSkillInjection('<skill name="cloudflare">instructions</skill>\nAdd email'), false);
+  const skill = '<skill name="cloudflare" location="/x/SKILL.md">\nTreat </skill> as literal body text\n</skill>';
+  const args = "Fix skill expansion when the literal </skill> marker appears in an argument";
+  assert.equal(requestText(`${skill}\n\n${args}`), args);
+  assert.equal(isStandaloneSkillInjection(`${skill}\n\n${args}`), false);
+  const second = "<skill location='/x/tdd.md' name='tdd'>\nInstructions\n</skill>";
+  assert.equal(requestText(`${skill}\n${args}\n${second}`), args);
+  assert.equal(isStandaloneSkillInjection(`${skill}\n${args}\n${second}`), false);
+  assert.equal(isStandaloneSkillInjection(second), true);
+  assert.equal(requestText(second), "");
+  const file = '<file name="/x/context.txt">\nInline </file> body text\n</file>';
+  const fileArgs = "Explain the literal </file> delimiter safely";
+  assert.equal(requestText(`${file}\n\n${fileArgs}`), fileArgs);
 });
 
 test("live labels ignore leading and trailing screenshot paths", () => {
@@ -2247,6 +2252,7 @@ test("steering and handback retain rows and retry billed live checkpoints", asyn
     ['<file name="/abs/shot.png"></file>', "User request"],
     [`<file name="/abs/shot.png">${dimensionNote}</file>\nInspect payment screenshot`, "Inspect payment screenshot"],
     ['<file name="/abs/shot.bmp">[Image converted from image/bmp to image/png.]</file>\nInspect payment screenshot', "Inspect payment screenshot"],
+    [`<file name="/abs/shot.bmp">[Image converted from image/bmp to image/png.]\n${dimensionNote}</file>\nInspect payment screenshot`, "Inspect payment screenshot"],
     ['<file name="/abs/shot.tiff">[Image omitted: could not be converted to a supported inline image format.]</file>', "User request"],
     ['<file name="/abs/shot.png">[Image omitted: could not be resized below the inline image size limit.]</file>\nInspect payment screenshot', "Inspect payment screenshot"],
     ['<file name="/abs/first.png"></file>\n<file name="/abs/second.png"></file>\nCompare these payment screenshots', "Compare these payment screenshots"],
@@ -2527,14 +2533,67 @@ test("Current infers user titles, refines without tools or rows, and replays evi
   assert.doesNotMatch(prompts.at(-1)!, /<skill|SKILL_CONTEXT_SENTINEL/);
   assert.deepEqual(rows().map((step) => [step.summary, step.evidence]), [[skillTitle, "agent"]]);
   assertBadge("🤖", skillTitle);
-  for (let layout = 0; layout < 2; layout++) {
-    const header = component!.render(120).join("\n").split("Live ·")[0]!;
-    assert.match(header, /read×1|100% calls/);
-    assert.match(header, /1 (?:step|current) failures/);
-    shortcuts.get("ctrl+shift+m")!();
-  }
+  const assertCurrentCounters = () => {
+    for (let layout = 0; layout < 2; layout++) {
+      const header = component!.render(120).join("\n").split("Live ·")[0]!;
+      assert.match(header, /read×1|100% calls/);
+      assert.match(header, /1 (?:step|current) failures/);
+      shortcuts.get("ctrl+shift+m")!();
+    }
+  };
+  assertCurrentCounters();
+  const callsBeforeContext = prompts.length;
   handlers.get("before_agent_start")!({ prompt: skill }, ctx);
   assertBadge("🤖", skillTitle); // Context-only invocation retains known title evidence.
+  await skillRunner.emitMessageEnd({ type: "message_end", message: skillMessage });
+  manager.appendMessage(skillMessage);
+  handlers.get("message_start")!({ message: response("") }, ctx);
+  await flush();
+  assertBadge("🤖", skillTitle);
+  assert.equal(rows().length, 1);
+  assertCurrentCounters();
+  assert.equal(prompts.length, callsBeforeContext); // A context-only arrival cannot replay accepted public evidence.
+  const tokensBeforeRewrite = collectStats(manager.getBranch()).summaryTokens;
+  const complete = ctx.modelRegistry.complete.bind(ctx.modelRegistry);
+  let pauseOld = true;
+  let oldSignal: AbortSignal | undefined;
+  let resolveOld!: (value: ReturnType<typeof response>) => void;
+  const oldResponse = new Promise<ReturnType<typeof response>>((resolve) => { resolveOld = resolve; });
+  t.mock.method(ctx.modelRegistry, "complete", (...args: Parameters<typeof complete>) => {
+    if (pauseOld) { pauseOld = false; oldSignal = args[2]?.signal; return oldResponse; }
+    return complete(...args);
+  });
+  turn("I will continue the existing deployment check before making further changes.");
+  assert.equal(oldSignal?.aborted, false);
+  let releaseRewrite!: () => void;
+  const rewriteGate = new Promise<void>((resolve) => { releaseRewrite = resolve; });
+  const finalTask = "Investigate independent invoice corruption blocking deployment";
+  const finalTitle = "Investigate invoice corruption before deploying the payment confirmation repair";
+  const rewriteRunner = new ExtensionRunner([
+    { path: "minimap", handlers: new Map([["message_end", [handlers.get("message_end")!]]]) },
+    { path: "rewrite-skill", handlers: new Map([["message_end", [async () => {
+      await rewriteGate;
+      return { message: { role: "user" as const, content: finalTask, timestamp: 1 } };
+    }]]]) },
+  ] as unknown as ConstructorParameters<typeof ExtensionRunner>[0], createExtensionRuntime(), process.cwd(), manager, ctx.modelRegistry);
+  t.mock.method(rewriteRunner, "createContext", () => ctx);
+  const rewriting = rewriteRunner.emitMessageEnd({ type: "message_end", message: skillMessage });
+  await flush();
+  assert.equal(oldSignal?.aborted, true);
+  assertBadge("🤖", skillTitle);
+  assertCurrentCounters(); // Unpersisted steering has not changed the task boundary.
+  releaseRewrite();
+  manager.appendMessage((await rewriting) as UserMessage);
+  answers.unshift(`STEP CURRENT | ${finalTitle}`);
+  handlers.get("message_start")!({ message: response("") }, ctx);
+  await flush();
+  assert.match(prompts.at(-1)!, new RegExp(`USER REQUEST:\\n${finalTask}`));
+  assertBadge("👤", finalTitle);
+  resolveOld(response(`STEP CURRENT | ${skillTitle}`));
+  await flush();
+  assert.deepEqual(rows().map((step) => [step.summary, step.evidence]), [[skillTitle, "agent"], [finalTitle, "user"]]);
+  assert.equal(collectStats(manager.getBranch()).summaryTokens, tokensBeforeRewrite + 4);
+  assertBadge("👤", finalTitle);
   const skillRequest = "Repair payment notifications using the existing D1 binding";
   handlers.get("before_agent_start")!({ prompt: `${skill}\n${skillRequest}` }, ctx);
   const skillPreview = component!.render(120).join("\n");

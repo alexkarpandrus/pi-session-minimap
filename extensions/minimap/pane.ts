@@ -30,6 +30,8 @@ import {
   conciseStep,
   failureReview,
   isConsequentialDecision,
+  isStandaloneSkillInjection,
+  textContent,
   oneLine,
   readableGoal,
 } from "./diagnostics.ts";
@@ -395,9 +397,11 @@ export class MinimapPane implements Component {
     const pending = entriesAfter(entries, previousThrough);
     // Consumed steering is visible before its turn-end checkpoint.
     const latestUser = pending.reduce((latest, entry, index) => entry.type === "message" &&
-      entry.message.role === "user"
+      entry.message.role === "user" && !isStandaloneSkillInjection(textContent(entry.message.content))
       ? index : latest, -1);
-    const awaitingUser = this.state.current?.awaitingUser && latestUser < 0;
+    const awaitingUser = this.state.current?.previewingTask &&
+      !entriesAfter(entries, this.state.current.userAfterEntryId).some((entry) =>
+        entry.type === "message" && entry.message.role === "user");
     const open = latestUser < 0 && !awaitingUser ? this.state.open : undefined;
     const pendingStats = collectStepStats(this.state.current?.label && !awaitingUser
       ? pending.slice(Math.max(0, latestUser)) : []);
