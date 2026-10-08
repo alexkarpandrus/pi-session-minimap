@@ -464,6 +464,12 @@ test("malformed persisted minimap entries are ignored", () => {
       callUsage: { ...usage(0, 0), cost: 0 },
       revision: { replaceCount: 1, steps: [] },
     }),
+    malformed("bad-evidence", "session-minimap-state", {
+      version: 1, callUsage: { ...usage(0, 0), cost: 0 }, revision: { replaceCount: 0, steps: [] },
+      open: { summary: "Invalid evidence", evidence: "unknown", throughEntryId: "user", tools: {}, decisions: [], errors: 0,
+        usage: { ...usage(0, 0), cost: 0 }, contextStart: { tokens: null, percent: null },
+        contextEnd: { tokens: null, percent: null }, createdAt: 0 },
+    }),
   ];
 
   assert.deepEqual(restoreSavedState(branch), { steps: [], open: undefined });
@@ -562,8 +568,8 @@ test("long single-prompt runs become bounded semantic sources", () => {
   const transcript = segments
     .map((segment) => buildTranscript(segment, 2_000))
     .join("\n");
-  assert.match(transcript, /Progress: Phase 1 progress/);
-  assert.match(transcript, /Progress: Phase 10 progress/);
+  assert.match(transcript, /Actions: edit/);
+  assert.doesNotMatch(transcript, /Phase \d+ progress|Progress:/);
 });
 
 test("tail plans rename and merge adjacent semantic sources", () => {
@@ -2235,6 +2241,16 @@ test("steering and handback retain rows and retry billed live checkpoints", asyn
     [[image, { type: "text" as const, text: `[Image converted from image/tiff to image/png.]\n${dimensionNote}` }], "User request"],
     [[image, { type: "text" as const, text: "[Image shows payment failure]" }], "[Image shows payment failure]"],
     ["/tmp/minimap-screenshot.png", "User request"],
+    ['<file name="/abs/shot.png"></file>\nFix the payment bug', "Fix the payment bug"],
+    ['<file name="/abs/shot.png"></file>', "User request"],
+    [`<file name="/abs/shot.png">${dimensionNote}</file>\nInspect payment screenshot`, "Inspect payment screenshot"],
+    ['<file name="/abs/shot.bmp">[Image converted from image/bmp to image/png.]</file>\nInspect payment screenshot', "Inspect payment screenshot"],
+    ['<file name="/abs/shot.tiff">[Image omitted: could not be converted to a supported inline image format.]</file>', "User request"],
+    ['<file name="/abs/shot.png">[Image omitted: could not be resized below the inline image size limit.]</file>\nInspect payment screenshot', "Inspect payment screenshot"],
+    ['<file name="/abs/first.png"></file>\n<file name="/abs/second.png"></file>\nCompare these payment screenshots', "Compare these payment screenshots"],
+    ['<file name="/abs/payment.ts">\nNATIVE_FILE_CONTEXT\n</file>\nFix the payment bug', "Fix the payment bug"],
+    ['<file name="/abs/payment.ts">\nNATIVE_FILE_CONTEXT\n</file>', "User request"],
+    ['[Image shows payment failure]\n<file name="/abs/shot.png"></file>', "[Image shows payment failure]"],
   ] satisfies Array<[UserMessage["content"], string]>) {
     const previousTitles = rows().map((step) => step.summary);
     handlers.get("before_agent_start")?.({ prompt: "Follow the next request" }, ctx);
@@ -2244,6 +2260,9 @@ test("steering and handback retain rows and retry billed live checkpoints", asyn
     await flush();
     assert.deepEqual(rows().map((step) => step.summary), [...previousTitles, label]);
     assert.ok((requests.at(-1) ?? "").startsWith(`CURRENT MILESTONE: ${label}\n`));
+    assert.doesNotMatch(requests.at(-1) ?? "", /<file name=|NATIVE_FILE_CONTEXT|\[Image(?:: original | converted from | omitted: )/);
+    for (const mode of ["live", "history"] as const)
+      assert.doesNotMatch(buildTranscript(manager.getBranch().slice(-5), 18_000, mode), /<file name=|NATIVE_FILE_CONTEXT|\[Image(?:: original | converted from | omitted: )/);
     await handlers.get("agent_settled")?.({}, ctx);
     assert.deepEqual(rows().slice(0, -1).map((step) => step.summary), previousTitles);
     assert.equal(rows().length, previousTitles.length + 1);
@@ -2275,4 +2294,134 @@ test("steering and handback retain rows and retry billed live checkpoints", asyn
   assert.equal(collectStats(manager.getBranch()).summaryTokens, beforeLate.summaryTokens + 33);
   assert.equal(rows().at(-1)?.summary, "Verified delayed checkpoint recovery with retained usage");
   handlers.get("session_shutdown")?.({}, ctx);
+});
+
+test("Current infers user titles, refines without tools or rows, and replays evidence badges", async () => {
+  type Handler = (event: unknown, ctx: ExtensionContext) => unknown;
+  const handlers = new Map<string, Handler>();
+  const shortcuts = new Map<string, () => void>();
+  const manager = SessionManager.inMemory(process.cwd());
+  const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
+  const userTitle = "Repair payment confirmation when settled invoices are reopened";
+  const refinedTitle = "Repair duplicate payment confirmation using the existing retry policy";
+  const pivot = "Investigate independent invoice corruption blocking the payment repair";
+  const answers = [`STEP CURRENT | ${userTitle}`, `STEP CURRENT | ${refinedTitle}`, `STEP NEW | ${pivot}`, "UNCHANGED"];
+  const prompts: string[] = [];
+  let component: Component | undefined;
+  let failRefinement = false;
+  const response = (text: string) => ({
+    role: "assistant" as const, content: [{ type: "text" as const, text }],
+    api: "test", provider: "test", model: "test", stopReason: "stop" as const, timestamp: 1,
+    usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.01 } },
+  });
+  const model = { contextWindow: 100 };
+  const ctx = {
+    mode: "tui", hasUI: true, model, sessionManager: manager, isIdle: () => true,
+    getContextUsage: () => ({ tokens: 10, percent: 10, contextWindow: 100 }),
+    modelRegistry: { complete: async (selected: unknown, request: { messages: Array<{ content: Array<{ text: string }> }> }) => {
+      assert.equal(selected, model);
+      prompts.push(request.messages[0]!.content[0]!.text);
+      assert.ok(answers.length, "unexpected model call");
+      return response(answers.shift()!);
+    } },
+    ui: { notify: () => {}, custom: (factory: (tui: TUI, theme: Theme, keybindings: never, done: () => void) => Component,
+      options: { onHandle?: (handle: OverlayHandle) => void }) => {
+      component = factory({ requestRender: () => {}, terminal: { rows: 50 } } as unknown as TUI,
+        { fg: (_: string, text: string) => text, bg: (_: string, text: string) => text, bold: (text: string) => text } as unknown as Theme, {} as never, () => {});
+      options.onHandle?.({ setHidden: () => {}, isHidden: () => false } as unknown as OverlayHandle);
+      return Promise.resolve(undefined);
+    } },
+  } as unknown as ExtensionContext;
+  minimapExtension({
+    on: (event: string, handler: Handler) => handlers.set(event, handler), registerCommand: () => {},
+    registerShortcut: (key: string, options: { handler: () => void }) => shortcuts.set(key, options.handler),
+    appendEntry: (type: string, data: unknown) => {
+      manager.appendCustomEntry(type, data);
+      if (failRefinement) { failRefinement = false; throw new Error("refinement append failed after leaf mutation"); }
+    },
+  } as unknown as ExtensionAPI);
+  const rows = () => {
+    const saved = restoreSavedState(manager.getBranch());
+    return [...saved.steps, ...(saved.open ? [saved.open] : [])];
+  };
+  const assertBadge = (badge: string, title: string) => {
+    for (let layout = 0; layout < 2; layout++) {
+      const text = component!.render(120).join("\n");
+      assert.ok(text.includes(`${badge} ${title.split(/\s+/).slice(0, 3).join(" ")}`), text);
+      shortcuts.get("ctrl+shift+m")!();
+    }
+  };
+  const steer = (content: UserMessage["content"]) => {
+    const message = { role: "user" as const, content, timestamp: 1 };
+    handlers.get("message_end")!({ message }, ctx);
+    manager.appendMessage(message); // Native ordering: emit, then persist.
+  };
+  const turn = (text: string) => {
+    const message = { ...response(text), content: [
+      { type: "thinking" as const, thinking: "**PRIVATE_TITLE_SENTINEL**" },
+      { type: "text" as const, text },
+    ] };
+    handlers.get("message_end")!({ message }, ctx);
+    manager.appendMessage(message);
+    const event = { message, toolResults: [] };
+    handlers.get("turn_end")!(event, ctx);
+    return event;
+  };
+  await handlers.get("session_start")!({}, ctx);
+  const request = "When I reopen a settled invoice, the payment confirmation runs again. Please find the cause and fix it without replacing the existing retry policy.";
+  handlers.get("before_agent_start")!({ prompt: request }, ctx);
+  steer(request);
+  await flush();
+  assert.equal(prompts.length, 1);
+  assert.ok(prompts[0]!.includes(request));
+  assert.deepEqual(rows().map((step) => [step.summary, step.evidence]), [[userTitle, "user"]]);
+  assertBadge("👤", userTitle);
+
+  failRefinement = true;
+  const refiningTurn = turn("The existing retry policy already supports deduplication; I will use it for payment confirmation.");
+  await flush();
+  assert.equal(rows()[0]?.summary, userTitle); // Failed refinement is not published.
+  assert.equal(collectStats(manager.getBranch()).summaryTokens, 2);
+  handlers.get("turn_end")!(refiningTurn, ctx);
+  await flush(); // Retry the checkpoint, not the provider.
+  assert.equal(prompts.length, 2); // Completed assistant turn, no tools required.
+  assert.doesNotMatch(prompts[1]!, /PRIVATE_TITLE_SENTINEL/);
+  assert.deepEqual(rows().map((step) => [step.summary, step.evidence]), [[refinedTitle, "both"]]);
+  assertBadge("🔗", refinedTitle);
+  for (const mode of ["live", "history"] as const)
+    assert.doesNotMatch(buildTranscript(manager.getBranch(), 18_000, mode), /PRIVATE_TITLE_SENTINEL/);
+
+  turn("An independent invoice corruption blocker prevents this repair; I will investigate that first.");
+  await flush();
+  assert.deepEqual(rows().map((step) => [step.summary, step.evidence]), [[refinedTitle, "both"], [pivot, "agent"]]);
+  assertBadge("🤖", pivot);
+  turn("Continuing the invoice corruption investigation.");
+  await flush();
+  assert.equal(rows().length, 2);
+  assert.equal(collectStats(manager.getBranch()).summaryTokens, 8);
+  const settledTitle = "Resolved invoice corruption preserving payment confirmation retry policy";
+  answers.push(`STEP CURRENT+NEW | ${settledTitle}`);
+  await handlers.get("agent_settled")!({}, ctx);
+  assert.deepEqual(rows().map((step) => [step.summary, step.evidence]), [[refinedTitle, "both"], [settledTitle, "agent"]]);
+  assert.equal(collectStats(manager.getBranch()).summaryTokens, 10);
+  assert.doesNotMatch(prompts.at(-1)!, /PRIVATE_TITLE_SENTINEL/);
+
+  const shortTitle = "Proceed with the work approved by the user";
+  answers.push(`STEP CURRENT | ${shortTitle}`);
+  handlers.get("before_agent_start")!({ prompt: "yes" }, ctx);
+  steer("yes");
+  await flush();
+  assert.equal(rows().length, 3);
+  assert.equal(rows().at(-1)?.evidence, "user");
+  assert.equal(rows().at(-1)?.summary, shortTitle);
+  assertBadge("👤", shortTitle);
+
+  // A reload reads the recorded metadata; it does not need a model call.
+  const callsBeforeReload = prompts.length;
+  await handlers.get("session_start")!({}, { ...ctx, model: undefined });
+  assertBadge("🔗", refinedTitle);
+  assertBadge("🤖", settledTitle);
+  assert.equal(prompts.length, callsBeforeReload);
+  handlers.get("session_shutdown")!({}, ctx);
 });

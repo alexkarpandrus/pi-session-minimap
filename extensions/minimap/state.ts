@@ -22,10 +22,12 @@ export interface ContextReset {
   afterPercent: number | null;
 }
 
+export type TitleEvidence = "user" | "agent" | "both";
 export interface MinimapStep {
   version: 1;
   throughEntryId: string;
   summary: string;
+  evidence?: TitleEvidence | undefined;
   tools: Record<string, number>;
   decisions: string[];
   errors: number;
@@ -44,7 +46,7 @@ export interface StepRevision {
 
 export type TailSource = Pick<
   OpenStep,
-  "throughEntryId" | "decisions" | "contextStart" | "contextEnd" | "createdAt"
+  "throughEntryId" | "decisions" | "contextStart" | "contextEnd" | "createdAt" | "evidence"
 >;
 
 export type MinimapStateData = {
@@ -75,6 +77,9 @@ export interface SessionStats extends UsageSnapshot {
 
 export interface CurrentStep {
   label: string;
+  evidence?: TitleEvidence | undefined;
+  request?: string;
+  needsTitle?: boolean;
   tools: Record<string, number>;
   errors: number;
   phase?: { label: string; startedAt: number };
@@ -152,6 +157,7 @@ const isStringArray = (value: unknown): value is string[] =>
 const isOpenStep = (value: unknown): value is OpenStep =>
   isRecord(value) &&
   typeof value.summary === "string" &&
+  (value.evidence === undefined || value.evidence === "user" || value.evidence === "agent" || value.evidence === "both") &&
   typeof value.throughEntryId === "string" &&
   isCounts(value.tools) &&
   isStringArray(value.decisions) &&

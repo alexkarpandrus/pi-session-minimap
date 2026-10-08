@@ -393,6 +393,11 @@ export const conciseStep = (text: string, maxWords = 10): string => {
     .replace(/[,:-]+$/, "");
 };
 
+// ponytail: native CLI file blocks and single-line image hints, not arbitrary XML; update if Pi changes the format.
+export const requestText = (text: string): string => text
+  .replace(/<file name="[^\r\n]*?">[\s\S]*?<\/file>/g, "")
+  .replace(/^\[Image(?:: original | converted from | omitted: )[^\r\n]*\]\r?$/gm, "")
+  .trim();
 export const readableGoal = (text: string): string => {
   const images = [...text.matchAll(/\.(?:png|jpe?g|gif|webp)/gi)];
   const first = images[0];

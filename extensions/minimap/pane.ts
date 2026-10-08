@@ -21,6 +21,7 @@ import {
   type SessionStats,
   type UsageSnapshot,
   type ViewState,
+  type TitleEvidence,
 } from "./state.ts";
 import {
   collectContextResets,
@@ -35,6 +36,8 @@ import {
   readableGoal,
 } from "./diagnostics.ts";
 
+const titleBadge = (evidence?: TitleEvidence): string =>
+  evidence ? `${{ user: "👤", agent: "🤖", both: "🔗" }[evidence]} ` : "";
 export const scrollWindow = (
   length: number,
   viewport: number,
@@ -491,7 +494,7 @@ export class MinimapPane implements Component {
       );
       header.push(
         ...wrappedRows(
-          ` ${status === "active" ? "●" : "✓"} Current ${this.state.steps.length + 1} · `,
+          ` ${status === "active" ? "●" : "✓"} Current ${this.state.steps.length + 1} · ${titleBadge(this.state.current?.evidence)}`,
           readableGoal(liveSummary),
           (value) => th.fg(status === "active" ? "accent" : "success", value),
           (value) => th.bold(th.fg("text", value)),
@@ -562,9 +565,10 @@ export class MinimapPane implements Component {
       tools: Record<string, number>,
       usage: UsageSnapshot,
       errors: number,
+      evidence: TitleEvidence | undefined,
     ) => {
       cardStarts.push(history.length);
-      const lines = wrapStepSummary(conciseStep(summary), goalWidth);
+      const lines = wrapStepSummary(`${titleBadge(evidence)}${conciseStep(summary)}`, goalWidth);
       const contextLabel = `${meterBar(end?.percent, 100, 6)} ${dashboardContextLabel(start?.percent, end?.percent, stepResets)}`;
       const stepCalls = Object.values(tools).reduce(
         (sum, count) => sum + count,
@@ -611,6 +615,7 @@ export class MinimapPane implements Component {
         step.tools,
         step.usage,
         step.errors,
+        step.evidence,
       );
       previousBoundary = Math.max(previousBoundary, endBoundary);
     }
@@ -812,15 +817,16 @@ export class MinimapPane implements Component {
       const step = settledSteps[index];
       if (!step) continue;
       cardStarts.push(history.length);
-      const prefix = ` ${index + 1}. `;
+      const prefix = ` ${index + 1}. ${titleBadge(step.evidence)}`;
+      const prefixWidth = visibleWidth(prefix);
       const wrapped = wrapStepSummary(
         conciseStep(step.summary),
-        inner - prefix.length,
+        inner - prefixWidth,
       );
       for (let line = 0; line < wrapped.length; line++)
         history.push(
           row(
-            `${line === 0 ? th.fg("accent", prefix) : " ".repeat(prefix.length)}${th.bold(th.fg("text", wrapped[line] ?? ""))}`,
+            `${line === 0 ? th.fg("accent", prefix) : " ".repeat(prefixWidth)}${th.bold(th.fg("text", wrapped[line] ?? ""))}`,
           ),
         );
       const endBoundary =
@@ -882,7 +888,7 @@ export class MinimapPane implements Component {
     if (liveSummary) {
       header.push(
         ...wrappedRows(
-          status === "active" ? " ● Current · " : " ✓ Current · ",
+          `${status === "active" ? " ● Current · " : " ✓ Current · "}${titleBadge(this.state.current?.evidence)}`,
           readableGoal(liveSummary),
           (value) => th.fg(status === "active" ? "accent" : "success", value),
           (value) => th.bold(th.fg("text", value)),

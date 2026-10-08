@@ -44,7 +44,9 @@ The current goal, session totals, context state, and recent history stay beside 
 
 The live trail shows the current activity and its elapsed time, plus the latest three public assistant updates or tool events. It updates as the agent streams, without extra model calls. Thinking shows status, not private reasoning text.
 
-During an active run, a background check after completed tool turns can add a milestone when public activity shows a significant direction change. Routine progress, retries, and phase changes do not add rows. The new title is provisional until handback, but previous rows stay visible. Checks use the selected pi model, add to minimap token costs, and coalesce new activity while a check is in flight. They do not read private reasoning or run per token.
+Current starts with a readable local label. A background check summarizes the consumed user request into a concise task title, even before the agent acts. Checks after completed assistant turns, with or without tools, can refine that title without adding a row. A significant public direction change adds a milestone; routine progress, retries, and phase changes do not. Only the latest title can settle at handback; previous rows stay visible. Checks use the selected pi model, add to minimap token costs, and coalesce new activity while a check is in flight. They do not read private reasoning or run per token.
+
+Title badges show inference evidence: `👤` user request, `🤖` public agent activity, `🔗` both. Rephrasing a user request remains `👤`; agent-informed refinement becomes `🔗`. Older records without stored evidence show no badge.
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/alexkarpandrus/pi-session-minimap/main/assets/compact.png" width="600" alt="Compact pi session minimap showing the current goal, context history, session cost, and completed goals">

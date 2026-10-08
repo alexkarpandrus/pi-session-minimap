@@ -17,11 +17,13 @@ import {
   type ContextSnapshot,
   type MinimapStateData,
   type TailSource,
+  type TitleEvidence,
   type ViewState,
 } from "./minimap/state.ts";
 import {
   isStandaloneSkillInjection,
   readableGoal,
+  requestText,
   oneLine,
   textContent,
 } from "./minimap/diagnostics.ts";
@@ -37,6 +39,7 @@ import {
   SUMMARY_TIMEOUT_MS,
   buildTranscript,
   parseTailPlan,
+  evidenceForEntries,
   reconcileTail,
   splitPendingActivity,
 } from "./minimap/summary.ts";
@@ -80,9 +83,7 @@ export {
 } from "./minimap/pane.ts";
 
 export default function minimapExtension(pi: ExtensionAPI) {
-  // ponytail: native single-line image hints; update the matcher if pi changes their format.
-  const promptLabel = (text: string) =>
-    readableGoal(text.replace(/^\[Image(?:: original | converted from | omitted: )[^\n]*\]$/gm, "")) || "User request";
+  const promptLabel = (text: string) => readableGoal(requestText(text)) || "User request";
   const state: ViewState = { steps: [], open: undefined, current: undefined };
   let overlay: OverlayHandle | undefined;
   let pane: MinimapPane | undefined;
@@ -104,7 +105,7 @@ export default function minimapExtension(pi: ExtensionAPI) {
         generation: number;
         data: MinimapStateData;
         current: ViewState["current"];
-        direction?: { throughEntryId: string | undefined; label: string | undefined } | undefined;
+        direction?: { throughEntryId: string | undefined; label: string | undefined; evidence?: TitleEvidence } | undefined;
       }
     | undefined;
 
@@ -173,8 +174,11 @@ export default function minimapExtension(pi: ExtensionAPI) {
     }
     if (pending.direction) {
       directionThroughEntryId = pending.direction.throughEntryId;
-      if (pending.direction.label && state.current && state.current === pending.current)
-        state.current.label = pending.direction.label;
+      if (state.current && state.current === pending.current) {
+        state.current.needsTitle = false;
+        if (pending.direction.label) state.current.label = pending.direction.label;
+        if (pending.direction.evidence) state.current.evidence = pending.direction.evidence;
+      }
     }
     pendingPersistence = undefined;
     if (pending.data.revision || pending.direction?.label) requestRender();
@@ -183,7 +187,7 @@ export default function minimapExtension(pi: ExtensionAPI) {
   const persist = (
     ctx: ExtensionContext,
     data: MinimapStateData,
-    direction?: { throughEntryId: string | undefined; label: string | undefined },
+    direction?: { throughEntryId: string | undefined; label: string | undefined; evidence?: TitleEvidence },
   ) => {
     if (pendingPersistence?.generation === branchGeneration && data.usageOnly) {
       addUsage(pendingPersistence.data.callUsage, data.callUsage);
@@ -202,7 +206,7 @@ export default function minimapExtension(pi: ExtensionAPI) {
     throughEntryId: string,
     previousThrough: string | undefined,
     callUsage = emptyUsage(),
-    direction?: { throughEntryId: string | undefined; label: string | undefined },
+    direction?: { throughEntryId: string | undefined; label: string | undefined; evidence?: TitleEvidence },
   ) => {
     const branch = ctx.sessionManager.getBranch();
     const now = snapshotContext(ctx);
@@ -214,6 +218,7 @@ export default function minimapExtension(pi: ExtensionAPI) {
       {
         throughEntryId, decisions: [], contextStart: start, contextEnd: now,
         createdAt: Date.parse(branch.find((entry) => entry.id === throughEntryId)!.timestamp),
+        evidence: direction ? "agent" : "user",
       },
     ];
     const { completed, open } = reconcileTail(
@@ -269,7 +274,7 @@ export default function minimapExtension(pi: ExtensionAPI) {
     );
     const throughEntryId = pending.at(-1)?.id;
     const transcript = buildTranscript(pending, MAX_TRANSCRIPT_CHARS, "live");
-    if (!transcript) {
+    if (!transcript && (!current.needsTitle || !readableGoal(current.request ?? ""))) {
       directionThroughEntryId = throughEntryId ?? directionThroughEntryId;
       return;
     }
@@ -286,7 +291,7 @@ export default function minimapExtension(pi: ExtensionAPI) {
               role: "user",
               content: [{
                 type: "text",
-                text: `CURRENT MILESTONE: ${current.label}\n\nPUBLIC ACTIVITY:\n${transcript}`,
+                text: `CURRENT MILESTONE: ${current.label}\n\nUSER REQUEST:\n${current.evidence === "agent" ? "" : current.request?.slice(0, MAX_TRANSCRIPT_CHARS / 3) ?? ""}\n\nPUBLIC ACTIVITY:\n${transcript}`,
               }],
               timestamp: Date.now(),
             },
@@ -307,12 +312,19 @@ export default function minimapExtension(pi: ExtensionAPI) {
         return;
       }
       const text = textContent(response.content).trim();
+      const refining = /^STEP\s+CURRENT\s*\|/i.test(text);
       const plan = response.stopReason !== "error" && response.stopReason !== "aborted"
-        ? parseTailPlan(text, ["NEW"]) : undefined;
-      const valid = text === "UNCHANGED" || (plan && !plan.decisions.length);
+        ? parseTailPlan(text, [refining ? "CURRENT" : "NEW"]) : undefined;
+      const valid = text === "UNCHANGED" || (plan && !plan.decisions.length && (refining || Boolean(transcript)));
       const label = valid ? plan?.groups[0]?.summary : undefined;
-      const direction = valid ? { throughEntryId, label } : undefined;
-      if (label && label !== current.label && throughEntryId) {
+      const evidence: TitleEvidence = refining ? (transcript && current.evidence !== "agent" ? "both" : current.evidence ?? "user") : "agent";
+      const direction = valid ? { throughEntryId: throughEntryId ?? directionThroughEntryId, label, ...(label ? { evidence } : {}) } : undefined;
+      if (label && refining && state.open) {
+        const { open } = reconcileTail(ctx.sessionManager.getBranch(), state.steps.at(-1)?.throughEntryId,
+          [{ ...state.open, throughEntryId: throughEntryId ?? state.open.throughEntryId, contextEnd: snapshotContext(ctx), evidence }],
+          { groups: [{ sources: ["CURRENT"], summary: label }], decisions: [] });
+        persist(ctx, { version: STEP_VERSION, revision: { replaceCount: 0, steps: [] }, open, callUsage }, direction);
+      } else if (label && label !== current.label && throughEntryId) {
         startStep(ctx, label, throughEntryId, directionThroughEntryId, callUsage, direction);
       } else {
         persist(ctx, { version: STEP_VERSION, usageOnly: true, callUsage }, direction);
@@ -419,6 +431,7 @@ export default function minimapExtension(pi: ExtensionAPI) {
         previousCurrent?.label ??
         openAtStart?.summary ??
         "Updating session map",
+      evidence: previousCurrent?.evidence ?? openAtStart?.evidence,
       tools: previousCurrent?.tools ?? emptyCounts(),
       errors: previousCurrent?.errors ?? 0,
       phase: { label: "Updating milestones", startedAt: Date.now() },
@@ -578,6 +591,7 @@ export default function minimapExtension(pi: ExtensionAPI) {
         return {
           throughEntryId: last.id,
           decisions: [],
+          evidence: evidenceForEntries(segment),
           contextStart: isLast ? runStart : unknownContext,
           contextEnd: isLast ? now : unknownContext,
           createdAt: Number.isFinite(sourceCreatedAt)
@@ -679,6 +693,9 @@ export default function minimapExtension(pi: ExtensionAPI) {
     streamingActivity = false;
     state.current = {
       label: promptLabel(event.prompt),
+      evidence: "user",
+      request: requestText(event.prompt),
+      needsTitle: true,
       tools: emptyCounts(),
       errors: 0,
       phase: { label: "Starting", startedAt: Date.now() },
@@ -742,7 +759,12 @@ export default function minimapExtension(pi: ExtensionAPI) {
       if (!isStandaloneSkillInjection(text)) {
         cancelDirectionUpdate();
         runContextStart = snapshotContext(ctx);
-        if (state.current) state.current = { ...state.current, label };
+        if (state.current) {
+          state.current = { ...state.current, label, evidence: "user", request: requestText(text), needsTitle: true };
+          // Pi emits message_end before persisting the consumed user message.
+          const current = state.current;
+          setImmediate(() => { if (state.current === current && directionThroughEntryId === undefined) void updateLiveDirection(ctx); });
+        }
       }
     }
     if (event.message.role === "assistant") {
@@ -756,7 +778,7 @@ export default function minimapExtension(pi: ExtensionAPI) {
       if (ctx.hasUI) ctx.ui.notify("Minimap checkpoint failed; it will retry after the next turn", "warning");
       return;
     }
-    if (event.message.role !== "assistant" || !event.toolResults.length) return;
+    if (event.message.role !== "assistant") return;
     void updateLiveDirection(ctx);
   });
   pi.on("session_compact", (_event, _ctx) => requestRender());
