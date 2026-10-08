@@ -707,6 +707,8 @@ export default function minimapExtension(pi: ExtensionAPI) {
       evidence: "user",
       request: requestText(event.prompt),
       needsTitle: true,
+      userAfterEntryId: directionThroughEntryId,
+      awaitingUser: true,
       tools: emptyCounts(),
       errors: 0,
       phase: { label: "Starting", startedAt: Date.now() },
@@ -776,7 +778,8 @@ export default function minimapExtension(pi: ExtensionAPI) {
             userAfterEntryId: ctx.sessionManager.getBranch().at(-1)?.id, awaitingUser: true };
           // Try after dispatch yields; updateLiveDirection checks persistence, not callback timing.
           const current = state.current;
-          setImmediate(() => { if (state.current === current && directionThroughEntryId === undefined) void updateLiveDirection(ctx); });
+          const generation = branchGeneration;
+          setImmediate(() => { if (generation === branchGeneration && state.current === current && directionThroughEntryId === undefined) void updateLiveDirection(ctx); });
         }
       }
     }

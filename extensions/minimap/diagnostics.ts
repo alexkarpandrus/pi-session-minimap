@@ -393,9 +393,9 @@ export const conciseStep = (text: string, maxWords = 10): string => {
     .replace(/[,:-]+$/, "");
 };
 
-// ponytail: native CLI file blocks and single-line image hints, not arbitrary XML; update if Pi changes the format.
+// ponytail: native file-context prefix ends at its last closing tag; use structured metadata if Pi changes this format.
 export const requestText = (text: string): string => text
-  .replace(/<file name="[^\r\n]*?">[\s\S]*?<\/file>/g, "")
+  .replace(/<file name="[^\r\n]*?">[\s\S]*<\/file>/g, "")
   .replace(/^\[Image(?:: original | converted from | omitted: )[^\r\n]*\]\r?$/gm, "")
   .trim();
 export const readableGoal = (text: string): string => {

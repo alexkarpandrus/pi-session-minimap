@@ -1965,12 +1965,12 @@ test("panes render live activity during thinking and tool execution", async (t) 
     assert.equal(handlers.get("turn_end")?.(event, ctx), undefined);
     return event;
   };
-  branch.push({
-    type: "message", id: "live-user", parentId: branch.at(-1)?.id ?? null,
-    timestamp: "2026-01-01T00:00:05Z",
-    message: { role: "user", content: "Repair authentication failure", timestamp: 1 },
-  });
-  handlers.get("before_agent_start")?.({ prompt: "Repair authentication failure" }, ctx);
+  const startRun = (prompt: string) => {
+    handlers.get("before_agent_start")?.({ prompt }, ctx);
+    branch.push({ type: "message", id: `live-user-${branch.length}`, parentId: branch.at(-1)?.id ?? null,
+      timestamp: "2026-01-01T00:00:05Z", message: { role: "user", content: prompt, timestamp: 1 } });
+  };
+  startRun("Repair authentication failure");
 
   const routine = addTurn("Checking authentication data");
   assert.equal(requests.length, 1);
@@ -2025,7 +2025,7 @@ test("panes render live activity during thinking and tool execution", async (t) 
 
   addTurn("A stale change must not replace the next run");
   const oldRun = requests[5]!;
-  handlers.get("before_agent_start")?.({ prompt: "Verify billing recovery" }, ctx);
+  startRun("Verify billing recovery");
   assert.equal(oldRun.signal?.aborted, true);
   const entriesBeforeStale = appendedEntries;
   const statsBeforeStale = collectStats(branch);
@@ -2055,7 +2055,7 @@ test("panes render live activity during thinking and tool execution", async (t) 
   assert.doesNotMatch(render(), /Live ·|Stale direction/);
   assert.equal(restoreSavedState(branch).open?.summary, "Restored authentication and billing after independent queue repair");
 
-  handlers.get("before_agent_start")?.({ prompt: "Check final recovery" }, ctx);
+  startRun("Check final recovery");
   addTurn("A stale direction from the previous session branch");
   const treeRequest = requests.at(-1)!;
   const entriesBeforeTree = appendedEntries;
@@ -2066,7 +2066,7 @@ test("panes render live activity during thinking and tool execution", async (t) 
   assert.equal(appendedEntries, entriesBeforeTree);
   assert.doesNotMatch(render(), /Live ·|Stale direction/);
 
-  handlers.get("before_agent_start")?.({ prompt: "Check final recovery" }, ctx);
+  startRun("Check final recovery");
   addTurn("A cancelled direction after shutdown");
   const shutdownRequest = requests.at(-1)!;
   handlers.get("session_shutdown")?.({}, ctx);
@@ -2241,6 +2241,8 @@ test("steering and handback retain rows and retry billed live checkpoints", asyn
     [[image, { type: "text" as const, text: `[Image converted from image/tiff to image/png.]\n${dimensionNote}` }], "User request"],
     [[image, { type: "text" as const, text: "[Image shows payment failure]" }], "[Image shows payment failure]"],
     ["/tmp/minimap-screenshot.png", "User request"],
+    ['<file name="/abs/markup.txt">\nInline </file>\nFILE_BODY_SENTINEL\n</file>\nFix the checkout page', "Fix the checkout page"],
+    ['<file name="/abs/markup.txt">\nInline </file>\nFILE_BODY_SENTINEL\n</file>', "User request"],
     ['<file name="/abs/shot.png"></file>\nFix the payment bug', "Fix the payment bug"],
     ['<file name="/abs/shot.png"></file>', "User request"],
     [`<file name="/abs/shot.png">${dimensionNote}</file>\nInspect payment screenshot`, "Inspect payment screenshot"],
@@ -2445,6 +2447,12 @@ test("Current infers user titles, refines without tools or rows, and replays evi
   ] as unknown as ConstructorParameters<typeof ExtensionRunner>[0], createExtensionRuntime(), process.cwd(), manager, ctx.modelRegistry);
   t.mock.method(runner, "createContext", () => ctx);
   const nextMessage = { role: "user" as const, content: "Fix billing notifications", timestamp: 1 };
+  handlers.get("before_agent_start")!({ prompt: nextMessage.content }, ctx);
+  for (let layout = 0; layout < 2; layout++) {
+    const header = component!.render(120).join("\n").split("Live ·")[0]!;
+    assert.doesNotMatch(header, /working ·|step failures|current failures/);
+    shortcuts.get("ctrl+shift+m")!();
+  }
   const dispatch = runner.emitMessageEnd({ type: "message_end", message: nextMessage });
   await flush();
   assert.equal(prompts.length, callsBeforeDelayed); // Never infer into the preceding open row.
@@ -2474,5 +2482,15 @@ test("Current infers user titles, refines without tools or rows, and replays evi
   assertBadge("🔗", refinedTitle);
   assertBadge("🤖", settledTitle);
   assert.equal(prompts.length, callsBeforeReload);
+  const shutdownTitle = "Do not start inferred task checks after shutdown";
+  answers.push(`STEP CURRENT | ${shutdownTitle}`);
+  handlers.get("before_agent_start")!({ prompt: shutdownTitle }, ctx);
+  const shutdownMessage = { role: "user" as const, content: shutdownTitle, timestamp: 1 };
+  manager.appendMessage((await runner.emitMessageEnd({ type: "message_end", message: shutdownMessage })) as UserMessage);
+  const callsBeforeShutdown = prompts.length;
+  const entriesBeforeShutdown = manager.getBranch().length;
   handlers.get("session_shutdown")!({}, ctx);
+  await flush();
+  assert.equal(prompts.length, callsBeforeShutdown);
+  assert.equal(manager.getBranch().length, entriesBeforeShutdown);
 });
