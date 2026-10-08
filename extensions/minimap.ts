@@ -261,6 +261,17 @@ export default function minimapExtension(pi: ExtensionAPI) {
   const updateLiveDirection = async (ctx: ExtensionContext): Promise<void> => {
     const current = state.current;
     if (ctx.mode !== "tui" || !ctx.model || !current || summaryRunning) return;
+    if (current.awaitingUser) {
+      // message_end dispatch can await other handlers before Pi appends their final message.
+      const consumed = entriesAfter(ctx.sessionManager.getBranch(), current.userAfterEntryId).flatMap((entry) =>
+        entry.type === "message" && entry.message.role === "user" && !isStandaloneSkillInjection(textContent(entry.message.content))
+          ? [entry.message] : []).at(0);
+      if (!consumed) return;
+      const text = textContent(consumed.content);
+      current.request = requestText(text);
+      current.label = promptLabel(text);
+      current.awaitingUser = false;
+    }
     if (directionAbort) {
       directionPending = true;
       return;
@@ -704,10 +715,11 @@ export default function minimapExtension(pi: ExtensionAPI) {
     requestRender();
   });
 
-  pi.on("message_start", (event) => {
+  pi.on("message_start", (event, ctx) => {
     if (event.message.role !== "assistant") return;
     streamingActivity = false;
     updateActivity("Generating response");
+    if (state.current?.needsTitle && state.current.awaitingUser !== undefined) void updateLiveDirection(ctx);
   });
 
   pi.on("message_update", (event) => {
@@ -760,8 +772,9 @@ export default function minimapExtension(pi: ExtensionAPI) {
         cancelDirectionUpdate();
         runContextStart = snapshotContext(ctx);
         if (state.current) {
-          state.current = { ...state.current, label, evidence: "user", request: requestText(text), needsTitle: true };
-          // Pi emits message_end before persisting the consumed user message.
+          state.current = { ...state.current, label, evidence: "user", request: requestText(text), needsTitle: true,
+            userAfterEntryId: ctx.sessionManager.getBranch().at(-1)?.id, awaitingUser: true };
+          // Try after dispatch yields; updateLiveDirection checks persistence, not callback timing.
           const current = state.current;
           setImmediate(() => { if (state.current === current && directionThroughEntryId === undefined) void updateLiveDirection(ctx); });
         }

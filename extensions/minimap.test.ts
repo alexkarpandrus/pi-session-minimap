@@ -6,7 +6,7 @@ import type {
   SessionEntry,
   Theme,
 } from "@earendil-works/pi-coding-agent";
-import { formatDimensionNote, SessionManager } from "@earendil-works/pi-coding-agent";
+import { createExtensionRuntime, ExtensionRunner, formatDimensionNote, SessionManager } from "@earendil-works/pi-coding-agent";
 import type { UserMessage } from "@earendil-works/pi-ai";
 import {
   visibleWidth,
@@ -2296,7 +2296,7 @@ test("steering and handback retain rows and retry billed live checkpoints", asyn
   handlers.get("session_shutdown")?.({}, ctx);
 });
 
-test("Current infers user titles, refines without tools or rows, and replays evidence badges", async () => {
+test("Current infers user titles, refines without tools or rows, and replays evidence badges", async (t) => {
   type Handler = (event: unknown, ctx: ExtensionContext) => unknown;
   const handlers = new Map<string, Handler>();
   const shortcuts = new Map<string, () => void>();
@@ -2348,7 +2348,10 @@ test("Current infers user titles, refines without tools or rows, and replays evi
   const assertBadge = (badge: string, title: string) => {
     for (let layout = 0; layout < 2; layout++) {
       const text = component!.render(120).join("\n");
-      assert.ok(text.includes(`${badge} ${title.split(/\s+/).slice(0, 3).join(" ")}`), text);
+      const marker = `${badge} ${title.split(/\s+/).slice(0, 3).join(" ")}`;
+      assert.ok(text.split("\n").some((line) => /\b\d+\./.test(line) && line.includes(marker)), text);
+      if (rows().at(-1)?.summary === title && text.includes("Current"))
+        assert.ok(text.split("\n").some((line) => line.includes("Current") && line.includes(marker)), text);
       shortcuts.get("ctrl+shift+m")!();
     }
   };
@@ -2416,6 +2419,54 @@ test("Current infers user titles, refines without tools or rows, and replays evi
   assert.equal(rows().at(-1)?.evidence, "user");
   assert.equal(rows().at(-1)?.summary, shortTitle);
   assertBadge("👤", shortTitle);
+
+  // A later native handler can delay persistence and replace the consumed message.
+  const oldWork = { ...response("Read the previous approval instructions"), stopReason: "toolUse" as const,
+    content: [{ type: "toolCall" as const, id: "prior-read", name: "read", arguments: {} }] };
+  const oldResult = { role: "toolResult" as const, toolCallId: "prior-read", toolName: "read",
+    content: [{ type: "text" as const, text: "Prior goal read failed" }], isError: true, timestamp: 1 };
+  manager.appendMessage(oldWork);
+  manager.appendMessage(oldResult);
+  answers.push("UNCHANGED");
+  handlers.get("turn_end")!({ message: oldWork, toolResults: [oldResult] }, ctx);
+  await flush();
+  const beforeDelayed = rows();
+  const callsBeforeDelayed = prompts.length;
+  const delayedTitle = "Restore billing notifications after repairing invoice confirmation failures";
+  answers.push(`STEP CURRENT | ${delayedTitle}`);
+  let releaseHandler!: () => void;
+  const delayedHandler = new Promise<void>((resolve) => { releaseHandler = resolve; });
+  const runner = new ExtensionRunner([
+    { path: "minimap", handlers: new Map([["message_end", [handlers.get("message_end")!]]]) },
+    { path: "delay", handlers: new Map([["message_end", [async () => {
+      await delayedHandler;
+      return { message: { role: "user" as const, content: "Repair billing notification failures after invoice confirmation", timestamp: 1 } };
+    }]]]) },
+  ] as unknown as ConstructorParameters<typeof ExtensionRunner>[0], createExtensionRuntime(), process.cwd(), manager, ctx.modelRegistry);
+  t.mock.method(runner, "createContext", () => ctx);
+  const nextMessage = { role: "user" as const, content: "Fix billing notifications", timestamp: 1 };
+  const dispatch = runner.emitMessageEnd({ type: "message_end", message: nextMessage });
+  await flush();
+  assert.equal(prompts.length, callsBeforeDelayed); // Never infer into the preceding open row.
+  assert.deepEqual(rows(), beforeDelayed);
+  for (let layout = 0; layout < 2; layout++) {
+    const header = component!.render(120).join("\n").split("Live ·")[0]!;
+    assert.doesNotMatch(header, /working ·|step failures|current failures/);
+    shortcuts.get("ctrl+shift+m")!();
+  }
+  releaseHandler();
+  const finalMessage = (await dispatch) ?? nextMessage;
+  assert.ok(finalMessage.role === "user");
+  manager.appendMessage(finalMessage);
+  handlers.get("message_start")!({ message: response("") }, ctx);
+  await flush();
+  assert.equal(prompts.length, callsBeforeDelayed + 1);
+  assert.match(prompts.at(-1)!, /USER REQUEST:\nRepair billing notification failures after invoice confirmation/);
+  assert.deepEqual(rows().slice(0, -1).map(({ summary, evidence }) => [summary, evidence]),
+    beforeDelayed.map(({ summary, evidence }) => [summary, evidence]));
+  assert.equal(rows().at(-1)?.summary, delayedTitle);
+  assert.equal(rows().at(-1)?.evidence, "user");
+  assertBadge("👤", delayedTitle);
 
   // A reload reads the recorded metadata; it does not need a model call.
   const callsBeforeReload = prompts.length;

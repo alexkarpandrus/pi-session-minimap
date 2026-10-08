@@ -399,8 +399,9 @@ export class MinimapPane implements Component {
     const latestUser = pending.reduce((latest, entry, index) => entry.type === "message" &&
       entry.message.role === "user" && !isStandaloneSkillInjection(textContent(entry.message.content))
       ? index : latest, -1);
-    const open = latestUser < 0 ? this.state.open : undefined;
-    const pendingStats = collectStepStats(this.state.current?.label
+    const awaitingUser = this.state.current?.awaitingUser && latestUser < 0;
+    const open = latestUser < 0 && !awaitingUser ? this.state.open : undefined;
+    const pendingStats = collectStepStats(this.state.current?.label && !awaitingUser
       ? pending.slice(Math.max(0, latestUser)) : []);
     const liveTools = Object.assign(emptyCounts(), open?.tools);
     for (const [name, count] of Object.entries(pendingStats.tools))

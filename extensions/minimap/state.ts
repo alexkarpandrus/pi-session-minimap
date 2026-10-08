@@ -80,6 +80,8 @@ export interface CurrentStep {
   evidence?: TitleEvidence | undefined;
   request?: string;
   needsTitle?: boolean;
+  userAfterEntryId?: string | undefined;
+  awaitingUser?: boolean;
   tools: Record<string, number>;
   errors: number;
   phase?: { label: string; startedAt: number };
