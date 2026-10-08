@@ -654,7 +654,8 @@ export default function minimapExtension(pi: ExtensionAPI) {
     try {
       while (true) {
         const mapped = await updateSemanticMap(ctx);
-        if (summaryPending && !summaryRunning) {
+        // A live/preflight Current owns request; SDK isIdle is still true before the prompt starts.
+        if (summaryPending && !summaryRunning && ctx.isIdle() && state.current?.request === undefined) {
           summaryPending = false;
           continue;
         }

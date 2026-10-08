@@ -2327,7 +2327,7 @@ test("Current infers user titles, refines without tools or rows, and replays evi
   });
   const model = { contextWindow: 100 };
   const ctx = {
-    mode: "tui", hasUI: true, model, sessionManager: manager, isIdle: () => true,
+    get mode() { return "tui" as const; }, hasUI: true, model, sessionManager: manager, isIdle: () => true,
     getContextUsage: () => ({ tokens: 10, percent: 10, contextWindow: 100 }),
     modelRegistry: { complete: async (selected: unknown, request: { messages: Array<{ content: Array<{ text: string }> }> }) => {
       assert.equal(selected, model);
@@ -2609,6 +2609,8 @@ test("Current infers user titles, refines without tools or rows, and replays evi
   manager.appendMessage(response("The previous run completed its invoice investigation before the session resumed."));
   handlers.get("session_start")!({}, ctx); // Startup backfill is asynchronous, unlike settled dispatch.
   assert.equal(backfillCalls, 1);
+  await handlers.get("model_select")!({}, ctx); // Idle selection queues another summary behind startup backfill.
+  t.mock.method(ctx, "isIdle", () => false); // A new primary run now streams before either backfill can finish.
   handlers.get("before_agent_start")!({ prompt: skill }, ctx);
   manager.appendMessage((await rewriteRunner.emitMessageEnd({ type: "message_end", message: skillMessage })) as UserMessage);
   handlers.get("message_start")!({ message: response("") }, ctx);
@@ -2630,5 +2632,42 @@ test("Current infers user titles, refines without tools or rows, and replays evi
   const skillPreview = component!.render(120).join("\n");
   assert.doesNotMatch(skillPreview, /<skill|SKILL_CONTEXT_SENTINEL/);
   assert.match(skillPreview, /👤 Repair payment notifications/);
+
+  let preflightCalls = 0;
+  let resolvePreflight!: (value: ReturnType<typeof response>) => void;
+  const preflightResponse = new Promise<ReturnType<typeof response>>((resolve) => { resolvePreflight = resolve; });
+  t.mock.method(ctx.modelRegistry, "complete", () => { preflightCalls++; return preflightResponse; });
+  t.mock.method(ctx, "isIdle", () => true);
+  manager.appendMessage(response("Public receipts remained uncheckpointed at the next startup."));
+  handlers.get("session_start")!({}, ctx);
+  await handlers.get("model_select")!({}, ctx);
+  handlers.get("before_agent_start")!({ prompt: `${skill}\n${skillRequest}` }, ctx);
+  resolvePreflight(response(`TAIL CURRENT+NEW | ${finalTitle}`));
+  await flush();
+  assert.equal(preflightCalls, 1); // SDK isIdle stays true during before_agent_start preflight.
+  assert.match(component!.render(120).join("\n"), /Current · 👤 Repair payment notifications/);
+
+  let stoppedCalls = 0;
+  let resolveStopped!: (value: ReturnType<typeof response>) => void;
+  const stoppedResponse = new Promise<ReturnType<typeof response>>((resolve) => { resolveStopped = resolve; });
+  t.mock.method(ctx.modelRegistry, "complete", () => { stoppedCalls++; return stoppedResponse; });
+  t.mock.method(ctx, "isIdle", () => true);
+  manager.appendMessage(response("Prior public work remained uncheckpointed when the session resumed again."));
+  handlers.get("session_start")!({}, ctx);
+  assert.equal(stoppedCalls, 1);
+  t.mock.method(ctx, "isIdle", () => false);
+  handlers.get("before_agent_start")!({ prompt: skill }, ctx);
+  manager.appendMessage((await rewriteRunner.emitMessageEnd({ type: "message_end", message: skillMessage })) as UserMessage);
+  handlers.get("message_start")!({ message: response("") }, ctx);
+  await flush();
+  const rowsBeforeStop = rows().map((step) => [step.createdAt, step.summary, step.evidence]);
+  handlers.get("session_shutdown")!({}, ctx);
+  let lateModeReads = 0;
+  t.mock.getter(ctx, "mode", () => { lateModeReads++; return "tui" as const; });
+  resolveStopped(response(`TAIL CURRENT+NEW | ${finalTitle}`));
+  await flush();
+  assert.equal(stoppedCalls, 1);
+  assert.equal(lateModeReads, 0); // Both cancellation/ownership protections must prevent invalid-context access.
+  assert.deepEqual(rows().map((step) => [step.createdAt, step.summary, step.evidence]), rowsBeforeStop);
   handlers.get("session_shutdown")!({}, ctx);
 });
