@@ -209,9 +209,9 @@ export const extractSkills = (
   return skills;
 };
 
-// Native skill bodies use newline-delimited tags; keep the existing single-line envelope too.
+// Native invocation owns one leading envelope; its suffix is user arguments, even when they contain tags.
 const stripSkillContext = (text: string): string => text.replace(
-  /<skill\b(?=[^>]*\bname=["'])[^>]*>(?:\r?\n[\s\S]*?\r?\n|[^\r\n]*?)<\/skill>/g, "",
+  /^\s*<skill\b(?=[^>]*\bname=["'])[^>]*>(?:\r?\n[\s\S]*?\r?\n|[^\r\n]*?)<\/skill>/, "",
 );
 
 export const isStandaloneSkillInjection = (text: string): boolean =>

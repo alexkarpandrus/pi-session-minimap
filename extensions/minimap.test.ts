@@ -813,13 +813,15 @@ test("standalone skill injections do not start semantic steps", () => {
   assert.equal(requestText(`${skill}\n\n${args}`), args);
   assert.equal(isStandaloneSkillInjection(`${skill}\n\n${args}`), false);
   const second = "<skill location='/x/tdd.md' name='tdd'>\nInstructions\n</skill>";
-  assert.equal(requestText(`${skill}\n${args}\n${second}`), args);
+  assert.equal(requestText(`${skill}\n${args}\n${second}`), `${args}\n${second}`);
   assert.equal(isStandaloneSkillInjection(`${skill}\n${args}\n${second}`), false);
   assert.equal(isStandaloneSkillInjection(second), true);
   assert.equal(requestText(second), "");
   const file = '<file name="/x/context.txt">\nInline </file> body text\n</file>';
   const fileArgs = "Explain the literal </file> delimiter safely";
   assert.equal(requestText(`${file}\n\n${fileArgs}`), fileArgs);
+  const exampleArgs = `Explain this skill-shaped example without deleting it:\n${second}`;
+  assert.equal(requestText(`${skill}\n\n${exampleArgs}`), exampleArgs);
 });
 
 test("live labels ignore leading and trailing screenshot paths", () => {
@@ -2594,6 +2596,35 @@ test("Current infers user titles, refines without tools or rows, and replays evi
   assert.deepEqual(rows().map((step) => [step.summary, step.evidence]), [[skillTitle, "agent"], [finalTitle, "user"]]);
   assert.equal(collectStats(manager.getBranch()).summaryTokens, tokensBeforeRewrite + 4);
   assertBadge("👤", finalTitle);
+
+  const tokensBeforeBackfill = collectStats(manager.getBranch()).summaryTokens;
+  let backfillCalls = 0;
+  let resolveBackfill!: (value: ReturnType<typeof response>) => void;
+  const backfillResponse = new Promise<ReturnType<typeof response>>((resolve) => { resolveBackfill = resolve; });
+  t.mock.method(ctx.modelRegistry, "complete", (...args: Parameters<typeof complete>) => {
+    backfillCalls++;
+    if (backfillCalls === 1) return backfillResponse;
+    return complete(...args);
+  });
+  manager.appendMessage(response("The previous run completed its invoice investigation before the session resumed."));
+  handlers.get("session_start")!({}, ctx); // Startup backfill is asynchronous, unlike settled dispatch.
+  assert.equal(backfillCalls, 1);
+  handlers.get("before_agent_start")!({ prompt: skill }, ctx);
+  manager.appendMessage((await rewriteRunner.emitMessageEnd({ type: "message_end", message: skillMessage })) as UserMessage);
+  handlers.get("message_start")!({ message: response("") }, ctx);
+  turn("I will inspect deployment receipts using the invoice investigation results.");
+  handlers.get("message_start")!({ message: response("") }, ctx);
+  await flush();
+  assertBadge("👤", finalTask); // Final local evidence must bind while the paid backfill is still pending.
+  assert.equal(backfillCalls, 1); // No concurrent live completion.
+  answers.unshift(`STEP CURRENT | ${finalTitle}`);
+  resolveBackfill(response(`TAIL CURRENT+NEW | ${finalTitle}`));
+  await flush();
+  assert.equal(backfillCalls, 2); // Resume exactly one coalesced check, without waiting for another turn.
+  assert.match(prompts.at(-1)!, new RegExp(`USER REQUEST:\\n${finalTask}`));
+  assertBadge("🔗", finalTitle);
+  assert.deepEqual(rows().map((step) => [step.summary, step.evidence]), [[skillTitle, "agent"], [finalTitle, "user"], [finalTitle, "both"]]);
+  assert.equal(collectStats(manager.getBranch()).summaryTokens, tokensBeforeBackfill + 4);
   const skillRequest = "Repair payment notifications using the existing D1 binding";
   handlers.get("before_agent_start")!({ prompt: `${skill}\n${skillRequest}` }, ctx);
   const skillPreview = component!.render(120).join("\n");

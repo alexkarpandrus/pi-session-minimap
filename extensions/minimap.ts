@@ -94,6 +94,7 @@ export default function minimapExtension(pi: ExtensionAPI) {
   let summaryAbort: AbortController | undefined;
   let directionAbort: AbortController | undefined;
   let directionPending = false;
+  let resumeDirectionAfterSummary: (() => void) | undefined;
   let directionThroughEntryId: string | undefined;
   let branchGeneration = 0;
   let runContextStart: ContextSnapshot | undefined;
@@ -255,12 +256,13 @@ export default function minimapExtension(pi: ExtensionAPI) {
     directionAbort?.abort();
     directionAbort = undefined;
     directionPending = false;
+    resumeDirectionAfterSummary = undefined;
     directionThroughEntryId = undefined;
   };
 
   const updateLiveDirection = async (ctx: ExtensionContext): Promise<void> => {
     const current = state.current;
-    if (ctx.mode !== "tui" || !current || summaryRunning) return;
+    if (ctx.mode !== "tui" || !current) return;
     // Dispatch can await later rewrites; only the final persisted user owns task evidence.
     const consumed = current.awaitingUser
       ? entriesAfter(ctx.sessionManager.getBranch(), current.userAfterEntryId).flatMap((entry) =>
@@ -284,6 +286,13 @@ export default function minimapExtension(pi: ExtensionAPI) {
       current.needsTitle = !injection || !state.open;
       current.awaitingUser = false;
       current.previewingTask = false;
+    }
+    if (summaryRunning) {
+      const generation = branchGeneration;
+      resumeDirectionAfterSummary = () => {
+        if (generation === branchGeneration && state.current === current) void updateLiveDirection(ctx);
+      };
+      return;
     }
     if (!ctx.model) return;
     const pending = entriesAfter(
@@ -663,6 +672,12 @@ export default function minimapExtension(pi: ExtensionAPI) {
           "warning",
         );
       return false;
+    } finally {
+      if (!summaryRunning) {
+        const resume = resumeDirectionAfterSummary;
+        resumeDirectionAfterSummary = undefined;
+        resume?.();
+      }
     }
   };
 
